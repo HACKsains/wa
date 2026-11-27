@@ -120,7 +120,8 @@ if (!defined('BASE_PATH'))   define('BASE_PATH', __DIR__);
 
 if (!defined('BASE_URL')) {
     if (PHP_SAPI === 'cli') {
-        define('BASE_URL', 'http://localhost/wa%20bot');
+        $isWinCli = DIRECTORY_SEPARATOR === '\\';
+        define('BASE_URL', $isWinCli ? 'http://localhost/wa%20bot' : ('https://' . APP_DOMAIN));
     } else {
         $protocol = $waIsHttps ? 'https://' : 'http://';
         $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
@@ -172,7 +173,7 @@ if (!defined('LEARN_API_BASE_URL')) {
         define('LEARN_API_BASE_URL', (string)$envLearnApi);
     } else {
         $reqHost = strtolower((string)($_SERVER['HTTP_HOST'] ?? ''));
-        $isLocalReq = (PHP_SAPI === 'cli')
+        $isLocalReq = (PHP_SAPI === 'cli' && DIRECTORY_SEPARATOR === '\\')
             || in_array($reqHost, ['localhost', '127.0.0.1', 'wa-bot.test'], true)
             || strpos($reqHost, 'localhost:') === 0
             || strpos($reqHost, '127.0.0.1:') === 0;
@@ -205,7 +206,10 @@ if (!defined('TEMPLATE_MODAL_PATH'))      define('TEMPLATE_MODAL_PATH', BASE_PAT
 if (!defined('TEMPLATE_CALENDAR_PATH'))   define('TEMPLATE_CALENDAR_PATH', BASE_PATH . '/includes/calendar-template.php');
 if (!defined('TEMPLATE_TABLE_PATH'))      define('TEMPLATE_TABLE_PATH', BASE_PATH . '/includes/table-template.php');
 if (!defined('ALERT_JS_PATH'))            define('ALERT_JS_PATH', BASE_PATH . '/assets/js/alert.js');
-if (!defined('APP_FAVICON_FILE'))         define('APP_FAVICON_FILE', '/assets/img/logo-wa-full.png');
+if (!defined('APP_LOGO_FILE'))            define('APP_LOGO_FILE', '/assets/img/logo-wa.png');
+if (!defined('APP_LOGO'))                 define('APP_LOGO', BASE_URL . APP_LOGO_FILE);
+if (!defined('APP_FAVICON_FILE'))         define('APP_FAVICON_FILE', '/favicon.ico');
+if (!defined('APP_FAVICON_PNG_FILE'))     define('APP_FAVICON_PNG_FILE', '/assets/img/logo-wa-icon.png');
 if (!defined('APP_FAVICON'))              define('APP_FAVICON', BASE_URL . APP_FAVICON_FILE);
 
 // 10. Autoloader PHP Native untuk Direktori core/
@@ -227,7 +231,17 @@ require_once BASE_PATH . '/database.php';
 // ==============================================================================
 
 /**
- * URL favicon dengan cache-busting filemtime
+ * URL logo resmi dengan cache-busting filemtime
+ */
+function getLogoUrl(): string
+{
+    $absolutePath = BASE_PATH . APP_LOGO_FILE;
+    $version = is_file($absolutePath) ? (string)filemtime($absolutePath) : APP_VERSION;
+    return APP_LOGO . '?v=' . $version;
+}
+
+/**
+ * URL favicon dengan cache-busting filemtime (sinkron dengan logo resmi)
  */
 function getFaviconUrl(): string
 {
@@ -237,14 +251,19 @@ function getFaviconUrl(): string
 }
 
 /**
- * Render tag <link> favicon terpusat
+ * Render tag <link> favicon terpusat (ICO + PNG 180x180 + Apple Touch Icon dari logo resmi)
  */
 function renderFavicon(): string
 {
-    $url  = htmlspecialchars(getFaviconUrl(), ENT_QUOTES, 'UTF-8');
-    $mime = str_ends_with(strtolower(APP_FAVICON_FILE), '.png') ? 'image/png' : 'image/x-icon';
-    return '    <link rel="icon" type="' . $mime . '" href="' . $url . '">' . "\n"
-         . '    <link rel="shortcut icon" type="' . $mime . '" href="' . $url . '">' . "\n";
+    $icoUrl  = htmlspecialchars(getFaviconUrl(), ENT_QUOTES, 'UTF-8');
+    $pngPath = BASE_PATH . APP_FAVICON_PNG_FILE;
+    $pngVer  = is_file($pngPath) ? (string)filemtime($pngPath) : APP_VERSION;
+    $pngUrl  = htmlspecialchars(BASE_URL . APP_FAVICON_PNG_FILE . '?v=' . $pngVer, ENT_QUOTES, 'UTF-8');
+
+    return '    <link rel="icon" type="image/x-icon" href="' . $icoUrl . '">' . "\n"
+         . '    <link rel="shortcut icon" type="image/x-icon" href="' . $icoUrl . '">' . "\n"
+         . '    <link rel="icon" type="image/png" sizes="180x180" href="' . $pngUrl . '">' . "\n"
+         . '    <link rel="apple-touch-icon" sizes="180x180" href="' . $pngUrl . '">' . "\n";
 }
 
 /**

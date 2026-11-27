@@ -3,9 +3,12 @@ declare(strict_types=1);
 
 /**
  * ==============================================================================
- * ILMUNA WA BOT — BRIDGE CONTROL & QR / PAIRING CODE API (AJAX / HMAC)
+ * ILMUNA WA BOT — BRIDGE CONTROL, AUTO-INSTALLER NODE/BAILEYS & QR API
  * ==============================================================================
- * Endpoint: /api/v1/bridge.php?action=status|env|start|stop|restart|qr|pairing|logs
+ * Endpoint:
+ *   /api/v1/bridge.php?action=status|env|install_all|install_node|install_baileys|
+ *                             install_status|start|stop|restart|reset_session|
+ *                             qr|pairing|logs
  * Dipakai oleh Admin Panel (dashboard/devices.php) maupun integrasi HMAC Learn.
  * ==============================================================================
  */
@@ -34,8 +37,16 @@ if (!$isAdminSession && !$isHmacValid) {
 
 $action = strtolower(trim((string)($_GET['action'] ?? $_POST['action'] ?? 'status')));
 
+// Simpan BASE_URL publik aktual agar Cron Job CLI tahu URL webhook HTTPS produksi
 try {
-    $pdo     = getDBConnection();
+    $pdo = getDBConnection();
+    if (PHP_SAPI !== 'cli' && !empty($_SERVER['HTTP_HOST'])) {
+        $currPublic = rtrim(BASE_URL, '/');
+        if (wa_get_setting('app_public_url', '', $pdo) !== $currPublic) {
+            wa_set_setting('app_public_url', $currPublic, $pdo);
+        }
+    }
+
     $manager = new BridgeManager($pdo);
 
     switch ($action) {
@@ -44,6 +55,21 @@ try {
 
         case 'status':
             wa_json_response(true, 'Status koneksi WA Bridge berhasil dimuat.', $manager->getStatus());
+
+        case 'install_all':
+            $res = $manager->installAll(true, true);
+            wa_json_response((bool)$res['success'], (string)$res['message'], $res, $res['success'] ? 200 : 422);
+
+        case 'install_node':
+            $res = $manager->installPortableNode(false);
+            wa_json_response((bool)$res['success'], (string)$res['message'], $res, $res['success'] ? 200 : 422);
+
+        case 'install_baileys':
+            $res = $manager->installBaileysDependencies(true);
+            wa_json_response((bool)$res['success'], (string)$res['message'], $res, $res['success'] ? 200 : 422);
+
+        case 'install_status':
+            wa_json_response(true, 'Status progres instalasi dimuat.', $manager->getInstallStatus());
 
         case 'start':
             $res = $manager->ensureRunning();
@@ -55,13 +81,22 @@ try {
 
         case 'restart':
             $manager->stop();
-            usleep(400_000);
+            usleep(400000);
             $res = $manager->start();
+            wa_json_response((bool)$res['success'], (string)$res['message'], $res, $res['success'] ? 200 : 422);
+
+        case 'reset_session':
+            $res = $manager->resetSession();
             wa_json_response((bool)$res['success'], (string)$res['message'], $res, $res['success'] ? 200 : 422);
 
         case 'qr':
             $res = $manager->getQrCode(true);
-            wa_json_response((bool)($res['success'] ?? false), (string)($res['error'] ?? 'QR siap dipindai.'), $res);
+            $msg = !empty($res['qr_data_url'])
+                ? 'QR WhatsApp siap dipindai.'
+                : (($res['status'] ?? '') === 'connected'
+                    ? 'WhatsApp sudah terhubung.'
+                    : (string)($res['error'] ?? $res['message'] ?? 'Menunggu Baileys menghasilkan QR Code (tunggu 3–5 detik lalu coba lagi)...'));
+            wa_json_response((bool)($res['success'] ?? false), $msg, $res);
 
         case 'pairing':
             $bodyData = json_decode($rawBody, true);
@@ -71,13 +106,16 @@ try {
                 (bool)($res['success'] ?? false),
                 !empty($res['pairing_code'])
                     ? 'Pairing Code berhasil dibuat. Masukkan kode di WhatsApp → Perangkat Tertaut → Tautkan dengan nomor telepon.'
-                    : (string)($res['error'] ?? 'Gagal membuat Pairing Code.'),
+                    : (string)($res['error'] ?? $res['message'] ?? 'Gagal membuat Pairing Code.'),
                 $res,
                 !empty($res['success']) ? 200 : 422
             );
 
         case 'logs':
-            wa_json_response(true, 'Log bridge berhasil diambil.', ['logs' => $manager->tailLog(60)]);
+            wa_json_response(true, 'Log bridge & installer berhasil diambil.', [
+                'bridge_log'    => $manager->tailLog(60),
+                'installer_log' => $manager->tailInstallerLog(80),
+            ]);
 
         default:
             wa_json_response(false, "Aksi '{$action}' tidak dikenali.", [], 400);

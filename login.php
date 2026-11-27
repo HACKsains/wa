@@ -689,7 +689,7 @@ if (isset($_GET['sso_login']) && $_GET['sso_login'] === '1') {
                 <div class="slide-glass-card">
                     <div class="logo-line">
                         <div class="logo-wrap">
-                            <img src="<?= htmlspecialchars(BASE_URL . '/assets/img/logo-wa.png', ENT_QUOTES, 'UTF-8') ?>"
+                            <img src="<?= htmlspecialchars(getLogoUrl(), ENT_QUOTES, 'UTF-8') ?>"
                                  alt="Panel WA Ilmuna"
                                  loading="lazy"
                                  draggable="false"

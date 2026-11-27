@@ -3,31 +3,40 @@ declare(strict_types=1);
 
 /**
  * ==============================================================================
- * ILMUNA WA BOT — PHP AUTOMATIC BRIDGE MANAGER & HOSTING ENVIRONMENT DETECTOR
+ * ILMUNA WA BOT — PHP AUTOMATIC NODE.JS PORTABLE + BAILEYS INSTALLER & MANAGER
  * ==============================================================================
- * Memungkinkan PHP mengendalikan siklus hidup WA Bridge secara otomatis tanpa
- * admin perlu membuka terminal manual:
+ * Mengendalikan instalasi Node.js Portable, `npm install` Baileys, dan siklus
+ * hidup daemon `bridge/server.js` 100% melalui PHP (tanpa SSH / Terminal):
  *
- * 1. Mode Binary Tunggal Go-WhatsApp (`bridge/bin/whatsapp` / `whatsapp.exe`):
- *    → ZERO Node.js! Cocok untuk server Linux/cPanel yang tidak punya Node.js
- *      namun mengizinkan exec/proc_open + Cron Watchdog.
- * 2. Mode Local Baileys Bridge (`bridge/server.js`):
- *    → Jika `node` tersedia (Laragon / VPS / PC Sekolah), PHP otomatis menjalankan
- *      dan menjaga daemon tetap hidup di background.
- * 3. Mode Pure PHP Hosting Terbatas (cPanel tanpa Node.js & tanpa exec/daemon):
- *    → Mendeteksi otomatis keterbatasan hosting dan mengarahkan koneksi lewat
- *      HTTP REST (Meta WhatsApp Cloud API Resmi / Fonnte / Whapi / Remote Bridge
- *      via Cloudflare Tunnel) tanpa error fatal!
+ * 1. Auto-Install Node.js Portable via PHP cURL + tar/PharData:
+ *    - Linux x64  : Node.js v20.18.1 LTS resmi (+ fallback otomatis v18.20.4
+ *                   glibc-217 untuk CloudLinux 7 / CentOS 7!)
+ *    - Linux arm64: Node.js v20.18.1 LTS arm64
+ *    - Windows x64: Node.js v20.18.1 LTS win-x64 zip
+ * 2. Auto-Install Dependensi Baileys (`@whiskeysockets/baileys`, `pino`, `qrcode`):
+ *    - Menjalankan `npm-cli.js` langsung via binary Node portable (kebal error PATH)
+ *    - Mendukung background non-blocking (anti-504 LiteSpeed) + live log viewer
+ * 3. Jalur Tanpa `exec` di Web PHP (Shared cPanel super-ketat):
+ *    - Tetap dapat dieksekusi 1x lewat cPanel Cron Job (`workers/bridge-installer.php`)
+ *      tanpa butuh SSH maupun terminal!
+ * 4. Kompatibel 100% PHP 7.4 (`ea-php74`) s/d PHP 8.3+.
  * ==============================================================================
  */
 
 class BridgeManager
 {
+    private const NODE_LTS_VERSION     = 'v20.18.1';
+    private const NODE_GLIBC217_VER    = 'v18.20.4';
+
     private PDO $pdo;
     private string $bridgeDir;
     private string $runtimeDir;
+    private string $portableNodeDir;
     private string $pidFile;
     private string $logFile;
+    private string $installerLogFile;
+    private string $installerStateFile;
+    private string $installerPidFile;
     private string $baseUrl;
     private int $port;
     private string $session;
@@ -36,20 +45,51 @@ class BridgeManager
 
     public function __construct(?PDO $pdo = null, array $config = [])
     {
-        $this->pdo           = $pdo ?? getDBConnection();
-        $this->bridgeDir     = rtrim((string)($config['bridge_dir'] ?? (BASE_PATH . '/bridge')), '/\\');
-        $this->runtimeDir    = $this->bridgeDir . DIRECTORY_SEPARATOR . 'runtime';
-        $this->pidFile       = $this->runtimeDir . DIRECTORY_SEPARATOR . 'bridge.pid';
-        $this->logFile       = $this->runtimeDir . DIRECTORY_SEPARATOR . 'bridge.log';
-        $this->baseUrl       = rtrim((string)($config['base_url'] ?? WA_BRIDGE_BASE_URL), '/');
-        $this->port          = (int)(parse_url($this->baseUrl, PHP_URL_PORT) ?: 3000);
-        $this->session       = (string)($config['session'] ?? WA_BRIDGE_SESSION);
-        $this->webhookSecret = (string)($config['webhook_secret'] ?? WA_BRIDGE_WEBHOOK_SECRET);
-        $this->apiKey        = (string)($config['api_key'] ?? WA_BRIDGE_API_KEY);
+        $this->pdo                = $pdo ?? getDBConnection();
+        $this->bridgeDir          = rtrim((string)($config['bridge_dir'] ?? (BASE_PATH . '/bridge')), '/\\');
+        $this->runtimeDir         = $this->bridgeDir . DIRECTORY_SEPARATOR . 'runtime';
+        $this->portableNodeDir    = $this->runtimeDir . DIRECTORY_SEPARATOR . 'node';
+        $this->pidFile            = $this->runtimeDir . DIRECTORY_SEPARATOR . 'bridge.pid';
+        $this->logFile            = $this->runtimeDir . DIRECTORY_SEPARATOR . 'bridge.log';
+        $this->installerLogFile   = $this->runtimeDir . DIRECTORY_SEPARATOR . 'installer.log';
+        $this->installerStateFile = $this->runtimeDir . DIRECTORY_SEPARATOR . 'install_state.json';
+        $this->installerPidFile   = $this->runtimeDir . DIRECTORY_SEPARATOR . 'installer.pid';
+
+        // Muat konfigurasi default dari tabel wa_devices jika tidak di-override manual
+        $dbDevice = null;
+        if (!isset($config['base_url'])) {
+            try {
+                $stmt = $this->pdo->query(
+                    "SELECT endpoint_url, api_token, webhook_secret
+                     FROM wa_devices
+                     WHERE driver = 'md_bridge'
+                     ORDER BY is_default DESC, id ASC
+                     LIMIT 1"
+                );
+                $row = $stmt ? $stmt->fetch(PDO::FETCH_ASSOC) : false;
+                if (is_array($row)) {
+                    $dbDevice = $row;
+                }
+            } catch (Throwable $e) {
+                $dbDevice = null;
+            }
+        }
+
+        $rawUrl = (string)($config['base_url']
+            ?? $config['endpoint_url']
+            ?? ($dbDevice && !empty($dbDevice['endpoint_url']) ? $dbDevice['endpoint_url'] : WA_BRIDGE_BASE_URL));
+        $this->baseUrl = rtrim($rawUrl, '/');
+        $this->port    = (int)(parse_url($this->baseUrl, PHP_URL_PORT) ?: 3000);
+        $this->session = (string)($config['session'] ?? WA_BRIDGE_SESSION);
+
+        $this->webhookSecret = (string)($config['webhook_secret']
+            ?? ($dbDevice && !empty($dbDevice['webhook_secret']) ? $dbDevice['webhook_secret'] : WA_BRIDGE_WEBHOOK_SECRET));
+        $this->apiKey = (string)($config['api_key']
+            ?? ($dbDevice && !empty($dbDevice['api_token']) ? $dbDevice['api_token'] : WA_BRIDGE_API_KEY));
     }
 
     /**
-     * Diagnosa kemampuan server (Windows Laragon / Linux VPS / Shared Hosting cPanel)
+     * Diagnosa lengkap kemampuan server (Laragon / VPS / Shared Hosting cPanel)
      */
     public function detectEnvironment(): array
     {
@@ -59,47 +99,97 @@ class BridgeManager
             explode(',', strtolower((string)ini_get('disable_functions')))
         );
 
-        $execAllowed = function_exists('proc_open') && !in_array('proc_open', $disabled, true);
-        $shellExecAllowed = function_exists('exec') && !in_array('exec', $disabled, true);
-        $canSpawn = $execAllowed || $shellExecAllowed;
+        $procOpenAllowed  = function_exists('proc_open') && !in_array('proc_open', $disabled, true);
+        $execAllowed      = function_exists('exec') && !in_array('exec', $disabled, true);
+        $shellExecAllowed = function_exists('shell_exec') && !in_array('shell_exec', $disabled, true);
+        $canSpawn         = $procOpenAllowed || $execAllowed;
 
-        $goBinary = $this->findGoWhatsAppBinary($isWindows);
-        $nodeBinary = $this->findNodeBinary($isWindows);
+        $goBinary         = $this->findGoWhatsAppBinary($isWindows);
+        $nodeBinary       = $this->findNodeBinary($isWindows);
+        $nodeIsPortable   = $nodeBinary !== null && strpos(str_replace('\\', '/', $nodeBinary), '/bridge/runtime/node') !== false;
+        $npmCli           = $nodeBinary !== null ? $this->findNpmCli($nodeBinary, $isWindows) : null;
+        $phpCliBinary     = $this->findPhpCliBinary($isWindows);
         $nodeServerExists = is_file($this->bridgeDir . DIRECTORY_SEPARATOR . 'server.js');
-        $nodeModulesReady = is_dir($this->bridgeDir . DIRECTORY_SEPARATOR . 'node_modules');
+        $baileysReady     = $this->isBaileysReady();
+        $isLocalTarget    = $this->isLocalhostEndpoint($this->baseUrl);
+        $curlLoaded       = extension_loaded('curl');
+        $pharLoaded       = class_exists('PharData');
+        $zipLoaded        = class_exists('ZipArchive');
+        $bridgeWritable   = is_dir($this->bridgeDir) && is_writable($this->bridgeDir);
+        $arch             = strtolower((string)php_uname('m'));
 
-        $isLocalTarget = $this->isLocalhostEndpoint($this->baseUrl);
-
-        // Tentukan strategi terbaik otomatis berdasarkan kapabilitas server
-        if (!$isLocalTarget) {
-            $recommended = 'remote_http_bridge';
-            $reason = 'Endpoint bridge mengarah ke server eksternal / Cloud Gateway (100% PHP cURL, tidak butuh Node.js di hosting).';
-        } elseif ($canSpawn && $goBinary !== null) {
-            $recommended = 'go_binary';
-            $reason = 'Binary tunggal Go-WhatsApp ditemukan (ZERO Node.js) dan PHP dapat menjalankannya otomatis.';
-        } elseif ($canSpawn && $nodeBinary !== null && $nodeServerExists) {
-            $recommended = 'node_baileys';
-            $reason = $nodeModulesReady
-                ? 'Node.js & Baileys Bridge lokal siap dijalankan otomatis oleh PHP.'
-                : 'Node.js ditemukan; jalankan `npm install` di folder bridge/ agar siap auto-start oleh PHP.';
-        } else {
-            $recommended = 'cloud_api_or_external_gateway';
-            $reason = 'Hosting shared tidak memiliki Node.js / binary lokal atau menonaktifkan proc_open. Gunakan Meta WhatsApp Cloud API Resmi (100% PHP) atau Gateway HTTP (Whapi/Fonnte/Bridge di PC Sekolah via Cloudflare Tunnel).';
+        $nodeVersion = null;
+        if ($nodeBinary !== null && $execAllowed) {
+            $vOut = [];
+            $vCode = 1;
+            @exec('"' . $nodeBinary . '" -v 2>&1', $vOut, $vCode);
+            if ($vCode === 0 && !empty($vOut[0])) {
+                $nodeVersion = trim((string)$vOut[0]);
+            }
         }
 
+        $canAutoInstallNode = $curlLoaded && $bridgeWritable && (!$isWindows || $zipLoaded);
+        $installState       = $this->readInstallState();
+
+        // Tentukan mode rekomendasi & strategi instalasi Baileys via PHP
+        if (!$isLocalTarget) {
+            $recommended     = 'remote_http_bridge';
+            $installStrategy = 'remote';
+            $reason          = 'Endpoint bridge mengarah ke server eksternal / Cloud Gateway (100% PHP cURL).';
+        } elseif ($canSpawn && $nodeBinary !== null && $nodeServerExists) {
+            $recommended     = 'node_baileys';
+            $installStrategy = $baileysReady ? 'ready' : 'web_one_click';
+            $reason          = $baileysReady
+                ? 'Node.js (' . ($nodeVersion ?: 'terdeteksi') . ') & Baileys siap dijalankan otomatis 1-klik oleh PHP!'
+                : 'Node.js ditemukan (' . ($nodeVersion ?: 'terdeteksi') . '). Klik "Install Node.js + Baileys" untuk memasang dependensi Baileys otomatis via PHP.';
+        } elseif ($canSpawn && $goBinary !== null) {
+            $recommended     = 'go_binary';
+            $installStrategy = 'ready';
+            $reason          = 'Binary tunggal Go-WhatsApp ditemukan dan siap dijalankan otomatis oleh PHP.';
+        } elseif ($canSpawn && $nodeServerExists && $canAutoInstallNode) {
+            $recommended     = 'node_baileys';
+            $installStrategy = 'web_one_click';
+            $reason          = 'Node.js belum terpasang, tetapi PHP di server ini BISA mengunduh Node.js Portable + install Baileys + menyalakan bot 1-klik langsung dari Panel Web (tanpa SSH/Terminal)!';
+        } elseif (!$canSpawn && $nodeServerExists) {
+            $recommended     = 'cloud_api_or_external_gateway';
+            $installStrategy = 'cron_installer';
+            $reason          = 'Web PHP memblokir fungsi exec/proc_open. Anda tetap bisa memasang Node.js Portable + Baileys TANPA SSH dengan menempel 1 baris perintah Cron Job Auto-Installer di cPanel → Cron Jobs, atau gunakan Meta Cloud API / Whapi / Fonnte.';
+        } else {
+            $recommended     = 'cloud_api_or_external_gateway';
+            $installStrategy = 'external_only';
+            $reason          = 'Hosting shared membatasi eksekusi proses lokal. Gunakan Meta WhatsApp Cloud API Resmi (100% PHP) atau Gateway HTTP (Whapi/Fonnte).';
+        }
+
+        $cronPhp = $phpCliBinary ?: ($isWindows ? 'php' : '/usr/local/bin/php');
+
         return [
-            'os'                  => $isWindows ? 'windows' : 'linux',
-            'php_version'         => PHP_VERSION,
-            'curl_loaded'         => extension_loaded('curl'),
-            'can_spawn_process'   => $canSpawn,
-            'is_local_endpoint'   => $isLocalTarget,
-            'go_binary'           => $goBinary,
-            'node_binary'         => $nodeBinary,
-            'node_server_exists'  => $nodeServerExists,
-            'node_modules_ready'  => $nodeModulesReady,
-            'recommended_mode'    => $recommended,
-            'recommendation_note' => $reason,
-            'target_base_url'     => $this->baseUrl,
+            'os'                   => $isWindows ? 'windows' : 'linux',
+            'arch'                 => $arch,
+            'php_version'          => PHP_VERSION,
+            'php_cli_binary'       => $phpCliBinary,
+            'curl_loaded'          => $curlLoaded,
+            'phar_loaded'          => $pharLoaded,
+            'zip_loaded'           => $zipLoaded,
+            'bridge_writable'      => $bridgeWritable,
+            'exec_allowed'         => $execAllowed,
+            'proc_open_allowed'    => $procOpenAllowed,
+            'shell_exec_allowed'   => $shellExecAllowed,
+            'can_spawn_process'    => $canSpawn,
+            'is_local_endpoint'    => $isLocalTarget,
+            'go_binary'            => $goBinary,
+            'node_binary'          => $nodeBinary,
+            'node_version'         => $nodeVersion,
+            'node_is_portable'     => $nodeIsPortable,
+            'npm_cli'              => $npmCli,
+            'node_server_exists'   => $nodeServerExists,
+            'node_modules_ready'   => $baileysReady,
+            'can_auto_install_node'=> $canAutoInstallNode,
+            'install_strategy'     => $installStrategy,
+            'install_state'        => $installState,
+            'cron_installer_cmd'   => $cronPhp . ' ' . BASE_PATH . '/workers/bridge-installer.php --auto-start >> ' . $this->installerLogFile . ' 2>&1',
+            'recommended_mode'     => $recommended,
+            'recommendation_note'  => $reason,
+            'target_base_url'      => $this->baseUrl,
         ];
     }
 
@@ -108,14 +198,13 @@ class BridgeManager
      */
     public function getStatus(): array
     {
-        $env = $this->detectEnvironment();
+        $env    = $this->detectEnvironment();
         $driver = $this->buildBridgeDriver($env);
         $health = $driver->healthCheck();
 
-        $pid = $this->readPid();
+        $pid      = $this->readPid();
         $pidAlive = $pid !== null && $this->isPidRunning($pid);
 
-        // Sinkronisasi status terbaru ke tabel wa_devices
         $this->syncDeviceStatus($health['status'] ?? 'disconnected');
 
         return [
@@ -126,8 +215,529 @@ class BridgeManager
             'pid'         => $pidAlive ? $pid : null,
             'pid_alive'   => $pidAlive,
             'http_status' => (int)($health['http_status'] ?? 0),
+            'me'          => is_array($health['raw'] ?? null) ? ($health['raw']['me'] ?? null) : null,
             'error'       => $health['error'] ?? null,
             'environment' => $env,
+        ];
+    }
+
+    /**
+     * 1-Klik Installer All-in-One: Unduh Node.js Portable + npm install Baileys + Auto-Start
+     * Pada Web request dengan `exec` aktif, pekerjaan berat dijalankan terpisah di background
+     * agar tidak terkena batas timeout LiteSpeed/Cloudflare (60 detik).
+     */
+    public function installAll(bool $background = true, bool $autoStart = true): array
+    {
+        $this->ensureRuntimeDir();
+        $env = $this->detectEnvironment();
+
+        // Cek apakah installer sedang berjalan
+        $instPid = $this->readInstallerPid();
+        if ($instPid !== null && $this->isPidRunning($instPid)) {
+            return [
+                'success' => true,
+                'status'  => 'running',
+                'pid'     => $instPid,
+                'message' => 'Proses instalasi Node.js & Baileys sedang berjalan di latar belakang. Pantau log progres di bawah.',
+                'install' => $this->getInstallStatus(),
+            ];
+        }
+
+        // Jika sudah siap 100%, langsung start saja
+        if ($env['node_binary'] !== null && $env['node_modules_ready']) {
+            $this->writeInstallState('done', 'ready', 100, 'Node.js & Baileys sudah terpasang lengkap.');
+            if ($autoStart) {
+                $startRes = $this->ensureRunning();
+                return [
+                    'success' => (bool)$startRes['success'],
+                    'status'  => 'done',
+                    'message' => 'Node.js & Baileys sudah siap! ' . ($startRes['message'] ?? ''),
+                    'start'   => $startRes,
+                    'install' => $this->getInstallStatus(),
+                ];
+            }
+            return [
+                'success' => true,
+                'status'  => 'done',
+                'message' => 'Node.js & Baileys sudah terpasang lengkap.',
+                'install' => $this->getInstallStatus(),
+            ];
+        }
+
+        // Jalur 1: Web background via PHP CLI (`workers/bridge-installer.php`) -> anti-timeout!
+        if ($background && $env['can_spawn_process'] && $env['php_cli_binary'] !== null) {
+            $installerScript = BASE_PATH . DIRECTORY_SEPARATOR . 'workers' . DIRECTORY_SEPARATOR . 'bridge-installer.php';
+            if (is_file($installerScript)) {
+                @file_put_contents($this->installerLogFile, '', LOCK_EX);
+                $this->appendInstallerLog('Memulai Auto-Installer Node.js Portable & Baileys via PHP (background)...');
+                $this->writeInstallState('running', 'starting', 5, 'Memulai proses instalasi otomatis di latar belakang...');
+
+                $args = $autoStart ? ' --auto-start' : '';
+                $cmd  = '"' . $env['php_cli_binary'] . '" "' . $installerScript . '"' . $args;
+                $pid  = $this->spawnDetachedProcess($cmd, BASE_PATH, $env['os'] === 'windows', [], $this->installerLogFile);
+
+                if ($pid !== null) {
+                    @file_put_contents($this->installerPidFile, (string)$pid, LOCK_EX);
+                }
+
+                return [
+                    'success' => true,
+                    'status'  => 'running',
+                    'pid'     => $pid,
+                    'message' => 'Auto-Installer Node.js Portable & Baileys berjalan di latar belakang (PID: ' . ($pid ?? 'aktif') . '). Estimasi 40–120 detik.',
+                    'install' => $this->getInstallStatus(),
+                ];
+            }
+        }
+
+        // Jalur 2: Jika Web PHP memblokir `exec`/`proc_open` (shared hosting super-ketat)
+        if (!$env['can_spawn_process']) {
+            // Tahap unduh & ekstrak Node.js portable tetap bisa dilakukan murni oleh PHP (cURL + PharData)!
+            $nodeNote = '';
+            if ($env['node_binary'] === null && $env['can_auto_install_node']) {
+                $dlRes = $this->installPortableNode(false);
+                if (!empty($dlRes['success'])) {
+                    $nodeNote = 'Node.js Portable berhasil diunduh & diekstrak murni oleh PHP! ';
+                }
+            }
+
+            $msg = $nodeNote
+                . 'Web PHP di hosting ini menonaktifkan exec/proc_open, sehingga langkah `npm install` & menyalakan Baileys dijalankan lewat 1 baris Cron Job cPanel (tanpa SSH). Salin perintah Cron Auto-Installer di bawah lalu tempel sekali di cPanel → Cron Jobs.';
+            $this->writeInstallState('needs_cron', 'cron_required', 40, $msg);
+
+            return [
+                'success'          => false,
+                'status'           => 'needs_cron',
+                'message'          => $msg,
+                'cron_command'     => $env['cron_installer_cmd'],
+                'install'          => $this->getInstallStatus(),
+            ];
+        }
+
+        // Jalur 3: Eksekusi langsung sinkron (CLI / fallback bila PHP CLI binary berbeda)
+        return $this->runFullInstallSync($autoStart);
+    }
+
+    /**
+     * Eksekusi instalasi penuh secara sinkron (dipakai oleh workers/bridge-installer.php & fallback)
+     */
+    public function runFullInstallSync(bool $autoStart = true): array
+    {
+        $this->ensureRuntimeDir();
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(300);
+        }
+        if (function_exists('ignore_user_abort')) {
+            @ignore_user_abort(true);
+        }
+
+        $isWindows = DIRECTORY_SEPARATOR === '\\';
+        $this->writeInstallState('running', 'checking_node', 10, 'Memeriksa ketersediaan runtime Node.js...');
+        $this->appendInstallerLog('=== ILMUNA AUTO-INSTALLER NODE.JS PORTABLE + BAILEYS ===');
+        $this->appendInstallerLog('OS: ' . PHP_OS . ' | Arch: ' . php_uname('m') . ' | PHP: ' . PHP_VERSION);
+
+        // 1. Pastikan Node.js tersedia
+        $nodeBin = $this->findNodeBinary($isWindows);
+        if ($nodeBin === null) {
+            $nodeRes = $this->installPortableNode(false);
+            if (empty($nodeRes['success'])) {
+                $err = (string)($nodeRes['message'] ?? 'Gagal memasang Node.js Portable.');
+                $this->writeInstallState('failed', 'node_failed', 20, $err);
+                return ['success' => false, 'status' => 'failed', 'message' => $err];
+            }
+            $nodeBin = (string)$nodeRes['node_binary'];
+        } else {
+            $this->appendInstallerLog('Node.js ditemukan: ' . $nodeBin);
+            $this->writeInstallState('running', 'node_ready', 45, 'Node.js siap: ' . $nodeBin);
+        }
+
+        // 2. Pastikan dependensi Baileys (`@whiskeysockets/baileys`, `pino`, `qrcode`) terpasang
+        if (!$this->isBaileysReady()) {
+            $npmRes = $this->installBaileysDependencies(false);
+            if (empty($npmRes['success'])) {
+                $err = (string)($npmRes['message'] ?? 'Gagal menjalankan npm install Baileys.');
+                $this->writeInstallState('failed', 'npm_failed', 65, $err);
+                return ['success' => false, 'status' => 'failed', 'message' => $err];
+            }
+        } else {
+            $this->appendInstallerLog('Dependensi Baileys sudah terpasang lengkap di bridge/node_modules.');
+            $this->writeInstallState('running', 'baileys_ready', 85, 'Dependensi Baileys sudah terpasang.');
+        }
+
+        // 3. Auto-start daemon `bridge/server.js` bila diminta
+        $startRes = null;
+        if ($autoStart) {
+            $this->writeInstallState('running', 'starting_bridge', 92, 'Menyalakan layanan Baileys WhatsApp Bridge...');
+            $this->appendInstallerLog('Menyalakan daemon bridge/server.js...');
+            $startRes = $this->ensureRunning();
+            if (!empty($startRes['success'])) {
+                $this->appendInstallerLog('BERHASIL: ' . ($startRes['message'] ?? 'Baileys Bridge aktif.'));
+            } else {
+                $this->appendInstallerLog('PERINGATAN START: ' . ($startRes['message'] ?? 'Bridge belum merespon.'));
+            }
+        }
+
+        $finalMsg = ($startRes && !empty($startRes['success']))
+            ? 'Instalasi selesai 100%! Node.js Portable + Baileys sudah AKTIF. Silakan klik "Ambil QR" atau "Pairing 8-Digit".'
+            : 'Node.js Portable & Baileys berhasil dipasang. Klik "Jalankan Baileys" lalu "Ambil QR".';
+
+        $this->writeInstallState('done', 'completed', 100, $finalMsg);
+        if (is_file($this->installerPidFile)) {
+            @unlink($this->installerPidFile);
+        }
+
+        return [
+            'success'     => true,
+            'status'      => 'done',
+            'node_binary' => $nodeBin,
+            'start'       => $startRes,
+            'message'     => $finalMsg,
+        ];
+    }
+
+    /**
+     * Unduh & ekstrak Node.js Portable resmi langsung via PHP cURL (tanpa SSH/CLI!)
+     * Mendukung fallback otomatis ke Node.js v18.20.4 glibc-217 untuk CloudLinux 7 / CentOS 7.
+     */
+    public function installPortableNode(bool $forceGlibc217 = false): array
+    {
+        $this->ensureRuntimeDir();
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(300);
+        }
+        if (!extension_loaded('curl')) {
+            return ['success' => false, 'message' => 'Ekstensi PHP cURL tidak aktif untuk mengunduh Node.js.'];
+        }
+
+        $isWindows = DIRECTORY_SEPARATOR === '\\';
+        $arch      = strtolower((string)php_uname('m'));
+        $isArm64   = strpos($arch, 'aarch64') !== false || strpos($arch, 'arm64') !== false;
+
+        if ($isWindows) {
+            $ver     = self::NODE_LTS_VERSION;
+            $url     = "https://nodejs.org/dist/{$ver}/node-{$ver}-win-x64.zip";
+            $archive = $this->runtimeDir . DIRECTORY_SEPARATOR . 'node_dist.zip';
+        } elseif ($forceGlibc217 && !$isArm64) {
+            $ver     = self::NODE_GLIBC217_VER;
+            $url     = "https://unofficial-builds.nodejs.org/download/release/{$ver}/node-{$ver}-linux-x64-glibc-217.tar.gz";
+            $archive = $this->runtimeDir . DIRECTORY_SEPARATOR . 'node_dist.tar.gz';
+        } elseif ($isArm64) {
+            $ver     = self::NODE_LTS_VERSION;
+            $url     = "https://nodejs.org/dist/{$ver}/node-{$ver}-linux-arm64.tar.gz";
+            $archive = $this->runtimeDir . DIRECTORY_SEPARATOR . 'node_dist.tar.gz';
+        } else {
+            $ver     = self::NODE_LTS_VERSION;
+            $url     = "https://nodejs.org/dist/{$ver}/node-{$ver}-linux-x64.tar.gz";
+            $archive = $this->runtimeDir . DIRECTORY_SEPARATOR . 'node_dist.tar.gz';
+        }
+
+        $this->writeInstallState('running', 'downloading_node', 18, "Mengunduh Node.js Portable {$ver}...");
+        $this->appendInstallerLog("Mengunduh Node.js Portable dari: {$url}");
+
+        // 1. Streaming download ke file (hemat RAM!)
+        $fp = @fopen($archive, 'wb');
+        if (!$fp) {
+            return ['success' => false, 'message' => 'Tidak dapat membuat berkas sementara di ' . $this->runtimeDir];
+        }
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_FILE           => $fp,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS      => 5,
+            CURLOPT_CONNECTTIMEOUT => 15,
+            CURLOPT_TIMEOUT        => 240,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_USERAGENT      => 'Ilmuna-WA-Bot-Installer/1.0',
+        ]);
+        $ok      = curl_exec($ch);
+        $curlErr = curl_error($ch);
+        $http    = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        fclose($fp);
+
+        if (!$ok || $http < 200 || $http >= 300 || !is_file($archive) || filesize($archive) < 1000000) {
+            @unlink($archive);
+            $err = "Gagal mengunduh Node.js Portable (HTTP {$http}): {$curlErr}";
+            $this->appendInstallerLog('ERROR: ' . $err);
+            return ['success' => false, 'message' => $err];
+        }
+
+        $sizeMb = round(filesize($archive) / 1048576, 1);
+        $this->appendInstallerLog("Unduhan selesai ({$sizeMb} MB). Mengekstrak ke bridge/runtime/node/...");
+        $this->writeInstallState('running', 'extracting_node', 32, "Mengekstrak Node.js Portable ({$sizeMb} MB)...");
+
+        // Bersihkan direktori target lama bila ada
+        $this->recursiveDelete($this->portableNodeDir);
+        @mkdir($this->portableNodeDir, 0755, true);
+
+        // 2. Ekstrak arsip
+        $extracted = false;
+        if ($isWindows) {
+            if (class_exists('ZipArchive')) {
+                $zip = new ZipArchive();
+                if ($zip->open($archive) === true) {
+                    $tmpDir = $this->runtimeDir . DIRECTORY_SEPARATOR . 'node_extract_tmp';
+                    $this->recursiveDelete($tmpDir);
+                    @mkdir($tmpDir, 0755, true);
+                    $zip->extractTo($tmpDir);
+                    $zip->close();
+                    $inner = glob($tmpDir . DIRECTORY_SEPARATOR . 'node-*', GLOB_ONLYDIR) ?: [];
+                    if (!empty($inner[0])) {
+                        $this->recursiveDelete($this->portableNodeDir);
+                        @rename($inner[0], $this->portableNodeDir);
+                        $extracted = is_file($this->portableNodeDir . DIRECTORY_SEPARATOR . 'node.exe');
+                    }
+                    $this->recursiveDelete($tmpDir);
+                }
+            }
+        } else {
+            // Linux: prioritaskan `tar -xzf --strip-components=1` (cepat & jaga symlink/chmod)
+            $disabled = array_map('trim', explode(',', strtolower((string)ini_get('disable_functions'))));
+            $execOk   = function_exists('exec') && !in_array('exec', $disabled, true);
+            if ($execOk) {
+                $tarOut  = [];
+                $tarCode = 1;
+                $tarCmd  = sprintf(
+                    'tar -xzf %s --strip-components=1 -C %s 2>&1',
+                    escapeshellarg($archive),
+                    escapeshellarg($this->portableNodeDir)
+                );
+                @exec($tarCmd, $tarOut, $tarCode);
+                if ($tarCode === 0 && is_file($this->portableNodeDir . '/bin/node')) {
+                    $extracted = true;
+                } else {
+                    $this->appendInstallerLog('tar CLI gagal/tidak tersedia, beralih ke Pure PHP PharData: ' . implode(' ', array_slice($tarOut, 0, 3)));
+                }
+            }
+
+            // Fallback Pure PHP PharData (berjalan TANPA exec!)
+            if (!$extracted && class_exists('PharData')) {
+                try {
+                    $tmpDir = $this->runtimeDir . DIRECTORY_SEPARATOR . 'node_extract_tmp';
+                    $this->recursiveDelete($tmpDir);
+                    @mkdir($tmpDir, 0755, true);
+                    $tarFile = $this->runtimeDir . DIRECTORY_SEPARATOR . 'node_dist.tar';
+                    @unlink($tarFile);
+
+                    $pharGz = new PharData($archive);
+                    $pharGz->decompress(); // menghasilkan node_dist.tar
+                    $pharTar = new PharData($tarFile);
+                    $pharTar->extractTo($tmpDir, null, true);
+                    @unlink($tarFile);
+
+                    $inner = glob($tmpDir . '/node-*', GLOB_ONLYDIR) ?: [];
+                    if (!empty($inner[0])) {
+                        $this->recursiveDelete($this->portableNodeDir);
+                        @rename($inner[0], $this->portableNodeDir);
+                        $extracted = is_file($this->portableNodeDir . '/bin/node');
+                    }
+                    $this->recursiveDelete($tmpDir);
+                } catch (Throwable $ePhar) {
+                    $this->appendInstallerLog('PharData error: ' . $ePhar->getMessage());
+                }
+            }
+
+            if ($extracted) {
+                @chmod($this->portableNodeDir . '/bin/node', 0755);
+                if (is_file($this->portableNodeDir . '/bin/npm')) {
+                    @chmod($this->portableNodeDir . '/bin/npm', 0755);
+                }
+            }
+        }
+
+        @unlink($archive);
+
+        $nodeBin = $isWindows
+            ? ($this->portableNodeDir . DIRECTORY_SEPARATOR . 'node.exe')
+            : ($this->portableNodeDir . '/bin/node');
+
+        if (!$extracted || !is_file($nodeBin)) {
+            $err = 'Gagal mengekstrak arsip Node.js Portable ke bridge/runtime/node/.';
+            $this->appendInstallerLog('ERROR: ' . $err);
+            return ['success' => false, 'message' => $err];
+        }
+
+        // 3. Verifikasi eksekusi binary + deteksi otomatis GLIBC lama (CloudLinux 7 / CentOS 7)
+        $disabled = array_map('trim', explode(',', strtolower((string)ini_get('disable_functions'))));
+        $execOk   = function_exists('exec') && !in_array('exec', $disabled, true);
+        $verOut   = [];
+        $verCode  = 0;
+
+        if ($execOk) {
+            @exec('"' . $nodeBin . '" -v 2>&1', $verOut, $verCode);
+            $joinedOut = implode("\n", $verOut);
+            if ($verCode !== 0 && !$isWindows && !$isArm64 && !$forceGlibc217 && stripos($joinedOut, 'GLIBC_') !== false) {
+                $this->appendInstallerLog("Deteksi GLIBC lama pada server ({$joinedOut}). Otomatis mengunduh Node.js " . self::NODE_GLIBC217_VER . ' glibc-217...');
+                return $this->installPortableNode(true);
+            }
+            if ($verCode !== 0) {
+                $err = "Binary Node.js gagal dijalankan (exit {$verCode}): {$joinedOut}";
+                $this->appendInstallerLog('ERROR: ' . $err);
+                return ['success' => false, 'message' => $err];
+            }
+            $this->appendInstallerLog('Verifikasi Node.js Portable OK: ' . trim($joinedOut));
+        } else {
+            $this->appendInstallerLog('Node.js Portable diekstrak ke: ' . $nodeBin . ' (verifikasi exec dilewati karena web exec dibatasi).');
+        }
+
+        $this->writeInstallState('running', 'node_ready', 45, 'Node.js Portable siap dipakai (' . trim(implode(' ', $verOut) ?: $ver) . ').');
+
+        return [
+            'success'      => true,
+            'node_binary'  => $nodeBin,
+            'node_version' => trim(implode(' ', $verOut)) ?: $ver,
+            'message'      => 'Node.js Portable berhasil dipasang di ' . $nodeBin,
+        ];
+    }
+
+    /**
+     * Pasang dependensi Baileys (`@whiskeysockets/baileys`, `pino`, `qrcode`) via npm-cli.js
+     */
+    public function installBaileysDependencies(bool $background = false): array
+    {
+        $this->ensureRuntimeDir();
+        $isWindows = DIRECTORY_SEPARATOR === '\\';
+        $disabled  = array_map('trim', explode(',', strtolower((string)ini_get('disable_functions'))));
+        $execOk    = function_exists('exec') && !in_array('exec', $disabled, true);
+
+        if (!$execOk) {
+            return [
+                'success' => false,
+                'message' => 'Fungsi PHP exec() dinonaktifkan pada Web PHP. Jalankan `workers/bridge-installer.php` lewat cPanel Cron Jobs.',
+            ];
+        }
+
+        $nodeBin = $this->findNodeBinary($isWindows);
+        if ($nodeBin === null) {
+            return [
+                'success' => false,
+                'message' => 'Runtime Node.js belum ditemukan. Jalankan "Install Node.js Portable" terlebih dahulu.',
+            ];
+        }
+
+        $npmCli = $this->findNpmCli($nodeBin, $isWindows);
+        if ($npmCli === null) {
+            return [
+                'success' => false,
+                'message' => 'Berkas npm-cli.js tidak ditemukan di dekat binary Node.js (' . $nodeBin . ').',
+            ];
+        }
+
+        $homeDir  = $this->runtimeDir . DIRECTORY_SEPARATOR . 'home';
+        $cacheDir = $this->runtimeDir . DIRECTORY_SEPARATOR . 'npm-cache';
+        if (!is_dir($homeDir)) {
+            @mkdir($homeDir, 0755, true);
+        }
+        if (!is_dir($cacheDir)) {
+            @mkdir($cacheDir, 0755, true);
+        }
+
+        $nodeDir = dirname($nodeBin);
+        $this->writeInstallState('running', 'installing_baileys', 58, 'Memasang @whiskeysockets/baileys, pino, & qrcode via npm...');
+        $this->appendInstallerLog('Menjalankan npm install --omit=dev di ' . $this->bridgeDir . '...');
+
+        if (str_ends_with(strtolower($npmCli), '.js')) {
+            $npmCommand = sprintf(
+                '"%s" --max-old-space-size=384 "%s" install --omit=dev --no-audit --no-fund',
+                $nodeBin,
+                $npmCli
+            );
+        } else {
+            $npmCommand = sprintf('"%s" install --omit=dev --no-audit --no-fund', $npmCli);
+        }
+
+        $envVars = [
+            'HOME'             => $homeDir,
+            'npm_config_cache' => $cacheDir,
+            'npm_config_update_notifier' => 'false',
+            'NODE_ENV'         => 'production',
+            'PATH'             => $nodeDir . PATH_SEPARATOR . ((string)getenv('PATH') ?: '/usr/local/bin:/usr/bin:/bin'),
+        ];
+
+        if ($background) {
+            $pid = $this->spawnDetachedProcess($npmCommand, $this->bridgeDir, $isWindows, $envVars, $this->installerLogFile);
+            if ($pid !== null) {
+                @file_put_contents($this->installerPidFile, (string)$pid, LOCK_EX);
+            }
+            return [
+                'success' => true,
+                'status'  => 'running',
+                'pid'     => $pid,
+                'message' => 'Pemasangan paket Baileys berjalan di latar belakang.',
+            ];
+        }
+
+        // Eksekusi sinkron (dipakai oleh workers/bridge-installer.php)
+        if ($isWindows) {
+            $prefix = '';
+            foreach ($envVars as $k => $v) {
+                $prefix .= 'set "' . $k . '=' . str_replace('"', '', $v) . '" && ';
+            }
+            $fullCmd = 'cd /d "' . $this->bridgeDir . '" && ' . $prefix . $npmCommand . ' 2>&1';
+        } else {
+            $prefix = '';
+            foreach ($envVars as $k => $v) {
+                $prefix .= $k . '=' . escapeshellarg($v) . ' ';
+            }
+            $fullCmd = 'cd ' . escapeshellarg($this->bridgeDir) . ' && ' . $prefix . $npmCommand . ' 2>&1';
+        }
+
+        $out  = [];
+        $code = 1;
+        @exec($fullCmd, $out, $code);
+        foreach ($out as $line) {
+            $this->appendInstallerLog($line);
+        }
+
+        if ($code === 0 && $this->isBaileysReady()) {
+            $this->appendInstallerLog('BERHASIL: Paket @whiskeysockets/baileys, pino, dan qrcode terpasang!');
+            $this->writeInstallState('running', 'baileys_ready', 85, 'Paket Baileys berhasil dipasang!');
+            return [
+                'success' => true,
+                'message' => 'Dependensi Baileys berhasil dipasang.',
+            ];
+        }
+
+        $tailErr = implode(' | ', array_slice($out, -5));
+        $err     = "npm install gagal (exit {$code}): " . ($tailErr ?: 'Periksa bridge/runtime/installer.log');
+        $this->appendInstallerLog('ERROR: ' . $err);
+        return ['success' => false, 'message' => $err];
+    }
+
+    /**
+     * Status progres instalasi & log live untuk polling Dashboard Admin
+     */
+    public function getInstallStatus(): array
+    {
+        $state    = $this->readInstallState();
+        $instPid  = $this->readInstallerPid();
+        $instLive = $instPid !== null && $this->isPidRunning($instPid);
+        $env      = $this->detectEnvironment();
+
+        // Jika status di JSON masih 'running' tapi prosesnya sudah selesai, perbarui otomatis
+        if (($state['status'] ?? '') === 'running' && !$instLive) {
+            if ($env['node_binary'] !== null && $env['node_modules_ready']) {
+                $state['status']  = 'done';
+                $state['percent'] = 100;
+                $state['phase']   = 'completed';
+                $state['message'] = 'Node.js Portable & Baileys sudah terpasang! Silakan klik "Jalankan Baileys" atau "Ambil QR".';
+                $this->writeInstallState('done', 'completed', 100, $state['message']);
+            }
+        }
+
+        return [
+            'status'          => (string)($state['status'] ?? 'idle'),
+            'phase'           => (string)($state['phase'] ?? 'idle'),
+            'percent'         => (int)($state['percent'] ?? 0),
+            'message'         => (string)($state['message'] ?? ''),
+            'updated_at'      => (string)($state['updated_at'] ?? ''),
+            'installer_alive' => $instLive,
+            'installer_pid'   => $instLive ? $instPid : null,
+            'installer_log'   => $this->tailFile($this->installerLogFile, 80),
+            'bridge_log'      => $this->tailLog(40),
+            'port_open'       => $this->isLocalhostEndpoint($this->baseUrl) && $this->isPortOpen('127.0.0.1', $this->port),
+            'environment'     => $env,
         ];
     }
 
@@ -150,10 +760,11 @@ class BridgeManager
     }
 
     /**
-     * Jalankan WA Bridge secara otomatis dari PHP (mendukung Go single-binary TANPA Node.js, maupun Baileys)
+     * Jalankan WA Bridge secara otomatis dari PHP (mendukung Baileys Node.js Portable maupun Go-WhatsApp)
      */
     public function start(): array
     {
+        $this->ensureRuntimeDir();
         $env = $this->detectEnvironment();
 
         if (!$env['is_local_endpoint']) {
@@ -167,24 +778,43 @@ class BridgeManager
 
         if (!$env['can_spawn_process']) {
             return [
-                'success' => false,
-                'action'  => 'hosting_restricted',
-                'message' => 'Hosting menonaktifkan proc_open/exec. Gunakan Meta WhatsApp Cloud API atau Gateway HTTP eksternal di halaman Devices (100% PHP tanpa daemon).',
-                'env'     => $env,
+                'success'      => false,
+                'action'       => 'hosting_restricted',
+                'message'      => 'Web PHP menonaktifkan proc_open/exec. Tempel perintah Cron Job Auto-Installer/Watchdog di cPanel → Cron Jobs agar Baileys menyala otomatis tanpa SSH.',
+                'cron_command' => $env['cron_installer_cmd'],
+                'env'          => $env,
             ];
         }
 
-        if (!is_dir($this->runtimeDir)) {
-            @mkdir($this->runtimeDir, 0755, true);
-        }
-
-        $webhookUrl = rtrim(BASE_URL, '/') . '/webhook.php';
+        $webhookUrl = $this->resolveWebhookUrl();
         $isWindows  = $env['os'] === 'windows';
         $modeUsed   = '';
         $pid        = null;
 
-        // Prioritas 1: Go-WhatsApp Single Binary (ZERO Node.js — sangat hemat RAM!)
-        if ($env['go_binary'] !== null) {
+        // Prioritas 1: Node.js + Baileys (`bridge/server.js`) jika Node & Baileys tersedia
+        if ($env['node_binary'] !== null && $env['node_server_exists'] && $env['node_modules_ready']) {
+            $modeUsed = 'node_baileys';
+            $homeDir  = $this->runtimeDir . DIRECTORY_SEPARATOR . 'home';
+            if (!is_dir($homeDir)) {
+                @mkdir($homeDir, 0755, true);
+            }
+            $envVars = [
+                'HOME'                  => $homeDir,
+                'NODE_ENV'              => 'production',
+                'BRIDGE_PORT'           => (string)$this->port,
+                'BRIDGE_SESSION'        => $this->session,
+                'BRIDGE_API_KEY'        => $this->apiKey,
+                'BRIDGE_WEBHOOK_URL'    => $webhookUrl,
+                'BRIDGE_WEBHOOK_SECRET' => $this->webhookSecret,
+            ];
+            $serverJs = $this->bridgeDir . DIRECTORY_SEPARATOR . 'server.js';
+            // Batasi V8 heap ke 256MB agar ramah CloudLinux LVE di shared hosting cPanel
+            $cmd = sprintf('"%s" --max-old-space-size=256 "%s"', $env['node_binary'], $serverJs);
+            $pid = $this->spawnDetachedProcess($cmd, $this->bridgeDir, $isWindows, $envVars, $this->logFile);
+            $this->updateBridgeFlavor('generic');
+        }
+        // Prioritas 2: Binary tunggal Go-WhatsApp (bila dipasang manual di bridge/bin/)
+        elseif ($env['go_binary'] !== null) {
             $modeUsed = 'go_binary';
             $cmd = sprintf(
                 '"%s" rest --port=%d --webhook="%s" --webhook-secret="%s"',
@@ -193,36 +823,22 @@ class BridgeManager
                 $webhookUrl,
                 $this->webhookSecret
             );
-            $pid = $this->spawnDetachedProcess($cmd, $this->bridgeDir, $isWindows);
+            $pid = $this->spawnDetachedProcess($cmd, $this->bridgeDir, $isWindows, [], $this->logFile);
             $this->updateBridgeFlavor('gowa');
         }
-        // Prioritas 2: Baileys Bridge lokal jika Node.js tersedia
-        elseif ($env['node_binary'] !== null && $env['node_server_exists']) {
-            if (!$env['node_modules_ready']) {
-                return [
-                    'success' => false,
-                    'action'  => 'deps_missing',
-                    'message' => 'Dependensi bridge belum terpasang. Jalankan sekali: `cd "C:\laragon\www\wa bot\bridge" && npm install` lalu klik Start lagi.',
-                    'env'     => $env,
-                ];
-            }
-            $modeUsed = 'node_baileys';
-            $envVars = [
-                'BRIDGE_PORT'           => (string)$this->port,
-                'BRIDGE_SESSION'        => $this->session,
-                'BRIDGE_API_KEY'        => $this->apiKey,
-                'BRIDGE_WEBHOOK_URL'    => $webhookUrl,
-                'BRIDGE_WEBHOOK_SECRET' => $this->webhookSecret,
+        // Jika Node.js sudah ada tapi Baileys belum di-install
+        elseif ($env['node_binary'] !== null && $env['node_server_exists'] && !$env['node_modules_ready']) {
+            return [
+                'success' => false,
+                'action'  => 'deps_missing',
+                'message' => 'Dependensi Baileys belum terpasang. Klik tombol "Install Node.js + Baileys (1-Klik PHP)" terlebih dahulu.',
+                'env'     => $env,
             ];
-            $serverJs = $this->bridgeDir . DIRECTORY_SEPARATOR . 'server.js';
-            $cmd = sprintf('"%s" "%s"', $env['node_binary'], $serverJs);
-            $pid = $this->spawnDetachedProcess($cmd, $this->bridgeDir, $isWindows, $envVars);
-            $this->updateBridgeFlavor('generic');
         } else {
             return [
                 'success' => false,
                 'action'  => 'no_runtime_found',
-                'message' => 'Tidak ditemukan binary Go-WhatsApp (bridge/bin/whatsapp) maupun Node.js di server ini. ' . $env['recommendation_note'],
+                'message' => 'Node.js belum terpasang di server ini. Klik tombol "Install Node.js + Baileys (1-Klik PHP)" untuk mengunduh Node.js Portable otomatis tanpa SSH.',
                 'env'     => $env,
             ];
         }
@@ -231,10 +847,10 @@ class BridgeManager
             @file_put_contents($this->pidFile, (string)$pid, LOCK_EX);
         }
 
-        // Tunggu sebentar (maks 3 detik) hingga port HTTP merespon
+        // Tunggu hingga maks 4 detik sampai port HTTP 127.0.0.1:3000 terbuka
         $ready = false;
-        for ($i = 0; $i < 6; $i++) {
-            usleep(500_000);
+        for ($i = 0; $i < 8; $i++) {
+            usleep(500000);
             if ($this->isPortOpen('127.0.0.1', $this->port)) {
                 $ready = true;
                 break;
@@ -242,14 +858,14 @@ class BridgeManager
         }
 
         return [
-            'success' => $ready || $pid !== null,
-            'action'  => 'started',
-            'runtime' => $modeUsed,
-            'pid'     => $pid,
-            'ready'   => $ready,
-            'message' => $ready
-                ? "WA Bridge ({$modeUsed}) berhasil dijalankan otomatis oleh PHP pada port {$this->port}."
-                : "Proses WA Bridge ({$modeUsed}) telah dipicu oleh PHP (PID: " . ($pid ?? 'n/a') . '). Periksa log jika belum merespon dalam beberapa detik.',
+            'success'  => $ready || $pid !== null,
+            'action'   => 'started',
+            'runtime'  => $modeUsed,
+            'pid'      => $pid,
+            'ready'    => $ready,
+            'message'  => $ready
+                ? "WA Bridge ({$modeUsed}) aktif di port {$this->port}! Tunggu 2–4 detik lalu klik Ambil QR / Pairing 8-Digit."
+                : "Proses WA Bridge ({$modeUsed}) telah dipicu oleh PHP (PID: " . ($pid ?? 'n/a') . '). Cek tab Log jika belum merespon.',
             'log_file' => $this->logFile,
         ];
     }
@@ -269,6 +885,10 @@ class BridgeManager
             @exec("taskkill /F /T /PID {$pid} >NUL 2>&1");
         } else {
             @exec("kill -TERM {$pid} >/dev/null 2>&1");
+            usleep(300000);
+            if ($this->isPidRunning($pid)) {
+                @exec("kill -KILL {$pid} >/dev/null 2>&1");
+            }
         }
 
         if (is_file($this->pidFile)) {
@@ -283,6 +903,31 @@ class BridgeManager
     }
 
     /**
+     * Putuskan sesi WhatsApp saat ini, bersihkan auth_info, dan mulai ulang agar QR baru muncul
+     */
+    public function resetSession(): array
+    {
+        $this->stop();
+        usleep(400000);
+
+        $authDir = $this->bridgeDir . DIRECTORY_SEPARATOR . 'auth_info' . DIRECTORY_SEPARATOR . $this->session;
+        if (is_dir($authDir)) {
+            $this->recursiveDelete($authDir);
+        }
+
+        $this->syncDeviceStatus('disconnected');
+        $startRes = $this->start();
+
+        return [
+            'success' => (bool)($startRes['success'] ?? true),
+            'message' => !empty($startRes['success'])
+                ? 'Sesi WhatsApp berhasil direset & Baileys dinyalakan ulang. Silakan pindai QR baru.'
+                : 'Sesi auth_info berhasil dibersihkan. ' . (string)($startRes['message'] ?? ''),
+            'start'   => $startRes,
+        ];
+    }
+
+    /**
      * Ambil QR Code (auto-start bila bridge lokal belum menyala)
      */
     public function getQrCode(bool $autoStart = true): array
@@ -292,6 +937,8 @@ class BridgeManager
             if (!$startRes['success']) {
                 return $startRes;
             }
+            // Beri waktu Baileys melakukan handshake awal ke server WA untuk mengeluarkan QR
+            sleep(2);
         }
 
         $env = $this->detectEnvironment();
@@ -308,6 +955,7 @@ class BridgeManager
             if (!$startRes['success']) {
                 return $startRes;
             }
+            sleep(2);
         }
 
         $env = $this->detectEnvironment();
@@ -315,14 +963,27 @@ class BridgeManager
     }
 
     /**
-     * Baca 40 baris terakhir log bridge untuk debugging cepat dari Dashboard Admin
+     * Baca N baris terakhir log bridge
      */
     public function tailLog(int $lines = 40): string
     {
-        if (!is_file($this->logFile)) {
+        return $this->tailFile($this->logFile, $lines);
+    }
+
+    /**
+     * Baca N baris terakhir log installer
+     */
+    public function tailInstallerLog(int $lines = 80): string
+    {
+        return $this->tailFile($this->installerLogFile, $lines);
+    }
+
+    private function tailFile(string $path, int $lines): string
+    {
+        if (!is_file($path)) {
             return '';
         }
-        $all = @file($this->logFile, FILE_IGNORE_NEW_LINES) ?: [];
+        $all = @file($path, FILE_IGNORE_NEW_LINES) ?: [];
         return implode("\n", array_slice($all, -max(1, $lines)));
     }
 
@@ -342,6 +1003,14 @@ class BridgeManager
         ]);
     }
 
+    private function isBaileysReady(): bool
+    {
+        $nm = $this->bridgeDir . DIRECTORY_SEPARATOR . 'node_modules';
+        return is_dir($nm . DIRECTORY_SEPARATOR . '@whiskeysockets' . DIRECTORY_SEPARATOR . 'baileys')
+            && is_dir($nm . DIRECTORY_SEPARATOR . 'qrcode')
+            && is_dir($nm . DIRECTORY_SEPARATOR . 'pino');
+    }
+
     private function findGoWhatsAppBinary(bool $isWindows): ?string
     {
         $binDir = $this->bridgeDir . DIRECTORY_SEPARATOR . 'bin';
@@ -359,20 +1028,33 @@ class BridgeManager
 
     private function findNodeBinary(bool $isWindows): ?string
     {
+        // 1. Prioritaskan Node.js Portable yang dipasang oleh PHP
+        $portable = $isWindows
+            ? ($this->portableNodeDir . '\node.exe')
+            : ($this->portableNodeDir . '/bin/node');
+        if (is_file($portable) && ($isWindows || is_executable($portable))) {
+            return $portable;
+        }
+
+        // 2. Lokasi standar sistem, CloudLinux alt-nodejs, EasyApache ea-nodejs, & Laragon
         $candidates = $isWindows
             ? [
                 'C:\laragon\bin\nodejs\node-v22\node.exe',
                 'C:\Program Files\nodejs\node.exe',
             ]
             : [
-                '/usr/bin/node',
-                '/usr/local/bin/node',
+                '/opt/alt/alt-nodejs22/root/usr/bin/node',
                 '/opt/alt/alt-nodejs20/root/usr/bin/node',
                 '/opt/alt/alt-nodejs18/root/usr/bin/node',
+                '/opt/cpanel/ea-nodejs22/bin/node',
+                '/opt/cpanel/ea-nodejs20/bin/node',
+                '/opt/cpanel/ea-nodejs18/bin/node',
+                '/usr/local/bin/node',
+                '/usr/bin/node',
             ];
 
         foreach ($candidates as $path) {
-            if (is_file($path)) {
+            if (is_file($path) && ($isWindows || is_executable($path))) {
                 return $path;
             }
         }
@@ -382,9 +1064,131 @@ class BridgeManager
             if ($glob !== []) {
                 return $glob[0];
             }
+        } else {
+            // Cek juga virtualenv Node cPanel jika pernah ada
+            $home = (string)(getenv('HOME') ?: dirname(BASE_PATH));
+            $venvGlob = glob($home . '/nodevenv/*/*/bin/node') ?: [];
+            if ($venvGlob !== []) {
+                return $venvGlob[0];
+            }
         }
 
         return null;
+    }
+
+    private function findNpmCli(string $nodeBin, bool $isWindows): ?string
+    {
+        $nodeDir = dirname($nodeBin);
+        if ($isWindows) {
+            $candidates = [
+                $nodeDir . '\node_modules\npm\bin\npm-cli.js',
+                $nodeDir . '\npm.cmd',
+            ];
+        } else {
+            $prefixDir  = dirname($nodeDir);
+            $candidates = [
+                $prefixDir . '/lib/node_modules/npm/bin/npm-cli.js',
+                $nodeDir . '/npm',
+                '/usr/local/bin/npm',
+                '/usr/bin/npm',
+            ];
+        }
+
+        foreach ($candidates as $cand) {
+            if (is_file($cand)) {
+                return $cand;
+            }
+        }
+        return null;
+    }
+
+    private function findPhpCliBinary(bool $isWindows): ?string
+    {
+        if ($isWindows) {
+            if (defined('PHP_BINARY') && is_file(PHP_BINARY) && stripos(basename(PHP_BINARY), 'php') === 0) {
+                return PHP_BINARY;
+            }
+            $glob = glob('C:\laragon\bin\php\*\php.exe') ?: [];
+            return $glob[0] ?? null;
+        }
+
+        // Hindari php-fpm / lsphp — cari binary PHP CLI sejati
+        if (defined('PHP_BINARY') && is_file(PHP_BINARY)) {
+            $base = strtolower(basename(PHP_BINARY));
+            if ($base === 'php' || $base === 'php-cli' || strpos($base, 'lsphp') === false && strpos($base, 'fpm') === false) {
+                return PHP_BINARY;
+            }
+        }
+
+        $candidates = [
+            '/usr/local/bin/php',
+            '/opt/cpanel/ea-php74/root/usr/bin/php',
+            '/opt/cpanel/ea-php81/root/usr/bin/php',
+            '/opt/cpanel/ea-php82/root/usr/bin/php',
+            '/opt/cpanel/ea-php83/root/usr/bin/php',
+            '/usr/bin/php',
+        ];
+        foreach ($candidates as $cand) {
+            if (is_file($cand) && is_executable($cand)) {
+                return $cand;
+            }
+        }
+        return null;
+    }
+
+    private function resolveWebhookUrl(): string
+    {
+        $savedBase = (string)wa_get_setting('app_public_url', '', $this->pdo);
+        if ($savedBase !== '' && (str_starts_with($savedBase, 'http://') || str_starts_with($savedBase, 'https://'))) {
+            return rtrim($savedBase, '/') . '/webhook.php';
+        }
+        return rtrim(BASE_URL, '/') . '/webhook.php';
+    }
+
+    private function ensureRuntimeDir(): void
+    {
+        if (!is_dir($this->runtimeDir)) {
+            @mkdir($this->runtimeDir, 0755, true);
+        }
+    }
+
+    private function appendInstallerLog(string $line): void
+    {
+        $this->ensureRuntimeDir();
+        $entry = '[' . date('H:i:s') . '] ' . $line . "\n";
+        @file_put_contents($this->installerLogFile, $entry, FILE_APPEND | LOCK_EX);
+    }
+
+    private function writeInstallState(string $status, string $phase, int $percent, string $message): void
+    {
+        $this->ensureRuntimeDir();
+        $payload = [
+            'status'     => $status,
+            'phase'      => $phase,
+            'percent'    => max(0, min(100, $percent)),
+            'message'    => $message,
+            'updated_at' => date('Y-m-d H:i:s'),
+        ];
+        @file_put_contents(
+            $this->installerStateFile,
+            json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT),
+            LOCK_EX
+        );
+    }
+
+    private function readInstallState(): array
+    {
+        if (!is_file($this->installerStateFile)) {
+            return [
+                'status'     => 'idle',
+                'phase'      => 'idle',
+                'percent'    => 0,
+                'message'    => '',
+                'updated_at' => '',
+            ];
+        }
+        $decoded = json_decode((string)@file_get_contents($this->installerStateFile), true);
+        return is_array($decoded) ? $decoded : ['status' => 'idle', 'phase' => 'idle', 'percent' => 0, 'message' => '', 'updated_at' => ''];
     }
 
     private function isLocalhostEndpoint(string $url): bool
@@ -405,10 +1209,20 @@ class BridgeManager
 
     private function readPid(): ?int
     {
-        if (!is_file($this->pidFile)) {
+        return $this->readPidFromFile($this->pidFile);
+    }
+
+    private function readInstallerPid(): ?int
+    {
+        return $this->readPidFromFile($this->installerPidFile);
+    }
+
+    private function readPidFromFile(string $file): ?int
+    {
+        if (!is_file($file)) {
             return null;
         }
-        $raw = trim((string)@file_get_contents($this->pidFile));
+        $raw = trim((string)@file_get_contents($file));
         return ctype_digit($raw) && (int)$raw > 0 ? (int)$raw : null;
     }
 
@@ -423,20 +1237,22 @@ class BridgeManager
         return function_exists('posix_kill') ? @posix_kill($pid, 0) : is_dir("/proc/{$pid}");
     }
 
-    private function spawnDetachedProcess(string $command, string $cwd, bool $isWindows, array $envVars = []): ?int
+    private function spawnDetachedProcess(string $command, string $cwd, bool $isWindows, array $envVars = [], ?string $logTarget = null): ?int
     {
+        $logDest = $logTarget ?: $this->logFile;
+
         if ($isWindows) {
             $envPrefix = '';
             foreach ($envVars as $k => $v) {
                 $safeVal = str_replace('"', '', $v);
                 $envPrefix .= "set \"{$k}={$safeVal}\" && ";
             }
-            $logEsc = str_replace('"', '', $this->logFile);
-            $batFile = $this->runtimeDir . DIRECTORY_SEPARATOR . 'start_bridge.bat';
+            $logEsc  = str_replace('"', '', $logDest);
+            $batName = 'run_' . substr(md5($command . $logDest), 0, 8) . '.bat';
+            $batFile = $this->runtimeDir . DIRECTORY_SEPARATOR . $batName;
             $batContent = "@echo off\r\ncd /d \"{$cwd}\"\r\n{$envPrefix}{$command} >> \"{$logEsc}\" 2>&1\r\n";
             @file_put_contents($batFile, $batContent, LOCK_EX);
 
-            // Jalankan terpisah (background tanpa memblokir request PHP) melalui PowerShell Start-Process -PassThru
             $psCmd = sprintf(
                 'powershell -NoProfile -NonInteractive -Command "(Start-Process -FilePath \'cmd.exe\' -ArgumentList \'/c\",\"%s\' -WorkingDirectory \'%s\' -WindowStyle Hidden -PassThru).Id"',
                 str_replace("'", "''", $batFile),
@@ -458,12 +1274,31 @@ class BridgeManager
             escapeshellarg($cwd),
             $envPrefix,
             $command,
-            escapeshellarg($this->logFile)
+            escapeshellarg($logDest)
         );
         $out = [];
         @exec($linuxCmd, $out);
         $pidStr = trim((string)($out[0] ?? ''));
         return ctype_digit($pidStr) ? (int)$pidStr : null;
+    }
+
+    private function recursiveDelete(string $dir): void
+    {
+        if (!file_exists($dir) && !is_link($dir)) {
+            return;
+        }
+        if (is_file($dir) || is_link($dir)) {
+            @unlink($dir);
+            return;
+        }
+        $items = @scandir($dir) ?: [];
+        foreach ($items as $item) {
+            if ($item === '.' || $item === '..') {
+                continue;
+            }
+            $this->recursiveDelete($dir . DIRECTORY_SEPARATOR . $item);
+        }
+        @rmdir($dir);
     }
 
     private function syncDeviceStatus(string $status): void

@@ -328,8 +328,23 @@ const server = http.createServer(async (req, res) => {
       if (connectionStatus === 'connected') {
         return sendJson(res, 409, { error: 'WhatsApp sudah terhubung.' });
       }
-      const code = await sock.requestPairingCode(phone);
-      return sendJson(res, 200, { success: true, pairing_code: code, phone });
+      const rawCode = await sock.requestPairingCode(phone);
+      const formatted = String(rawCode || '').replace(/(.{4})(?=.)/g, '$1-');
+      return sendJson(res, 200, { success: true, pairing_code: formatted || rawCode, phone });
+    }
+
+    // 3B. Logout & Hapus Sesi Auth agar bisa scan nomor baru
+    if (method === 'POST' && /^\/api\/sessions\/[^/]+\/logout$/.test(pathname)) {
+      try {
+        if (sock) await sock.logout();
+      } catch {}
+      connectionStatus = 'disconnected';
+      latestQrRaw = null;
+      latestQrDataUrl = null;
+      connectedMe = null;
+      fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+      setTimeout(() => initWhatsApp().catch((e) => console.error('[WA Reinit Error]:', e.message)), 1500);
+      return sendJson(res, 200, { success: true, status: 'logged_out' });
     }
 
     // Pastikan WhatsApp terhubung untuk aksi kirim/moderasi
@@ -441,3 +456,11 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`[Ilmuna WA Bridge] Listening on http://127.0.0.1:${PORT} (session=${SESSION})`);
   initWhatsApp().catch((e) => console.error('[WA Init Error]:', e.message));
 });
+
+function gracefulShutdown(signal) {
+  console.log(`[Ilmuna WA Bridge] Menerima sinyal ${signal}, menutup server dengan bersih...`);
+  try { server.close(); } catch {}
+  process.exit(0);
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

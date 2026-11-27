@@ -28,7 +28,7 @@ $initials = mb_strtoupper($initials ?: 'AD', 'UTF-8');
 
 $navItems = [
     ['file' => 'index.php',       'label' => 'Overview Live',     'icon' => 'solar:home-2-bold',               'section' => 'Utama'],
-    ['file' => 'devices.php',     'label' => 'Devices & Pure PHP','icon' => 'solar:smartphone-2-bold',         'section' => 'Utama'],
+    ['file' => 'devices.php',     'label' => 'Devices & Baileys','icon' => 'solar:smartphone-2-bold',         'section' => 'Utama'],
     ['file' => 'menus.php',       'label' => 'Menu Tombol',       'icon' => 'solar:widget-5-bold',             'section' => 'Otomasi'],
     ['file' => 'broadcast.php',   'label' => 'Broadcast Akademik','icon' => 'solar:plain-3-bold',              'section' => 'Otomasi'],
     ['file' => 'group-guard.php', 'label' => 'Group Guard',       'icon' => 'solar:shield-warning-bold',       'section' => 'Proteksi'],
@@ -63,7 +63,7 @@ $navItems = [
     <aside class="wa-sidebar" aria-label="Navigasi Admin WA Bot">
         <div class="wa-sidebar-brand ilmuna-logo-shield" oncontextmenu="return false;">
             <div class="wa-sidebar-logo-pill">
-                <img src="<?= htmlspecialchars(BASE_URL) ?>/assets/img/logo-wa.png" alt="Panel WA" loading="lazy" draggable="false">
+                <img src="<?= htmlspecialchars(getLogoUrl(), ENT_QUOTES, 'UTF-8') ?>" alt="Panel WA" loading="lazy" draggable="false">
             </div>
             <div class="wa-sidebar-brand-meta">
                 <div class="wa-sidebar-brand-sub">Admin · Margo One SSO</div>
