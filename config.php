@@ -499,6 +499,16 @@ function wa_verify_csrf(?string $token): bool
 }
 
 /**
+ * Lepas exclusive file lock PHP session agar request AJAX & navigasi paralel tidak saling antre
+ */
+function wa_release_session_lock(): void
+{
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        session_write_close();
+    }
+}
+
+/**
  * Standar Respon JSON Seragam (Hukum 6 learn/README.md)
  *
  * @param mixed $data

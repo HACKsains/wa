@@ -25,6 +25,7 @@ if (isset($_GET['ping']) && $_GET['ping'] === '1') {
 }
 
 $isAdminSession = !empty($_SESSION['wa_admin_logged_in']);
+wa_release_session_lock();
 $headers        = wa_get_request_headers();
 $isHmacValid    = wa_verify_hmac(
     (string)($headers['x-ilmuna-timestamp'] ?? ''),

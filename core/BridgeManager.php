@@ -43,6 +43,7 @@ class BridgeManager
     private string $session;
     private string $webhookSecret;
     private string $apiKey;
+    private ?array $cachedEnv = null;
 
     public function __construct(?PDO $pdo = null, array $config = [])
     {
@@ -92,8 +93,12 @@ class BridgeManager
     /**
      * Diagnosa lengkap kemampuan server (Laragon / VPS / Shared Hosting cPanel)
      */
-    public function detectEnvironment(): array
+    public function detectEnvironment(bool $forceRefresh = false): array
     {
+        if (!$forceRefresh && $this->cachedEnv !== null) {
+            return $this->cachedEnv;
+        }
+
         $isWindows = DIRECTORY_SEPARATOR === '\\';
         $disabled  = array_map(
             'trim',
@@ -119,15 +124,8 @@ class BridgeManager
         $bridgeWritable   = is_dir($this->bridgeDir) && is_writable($this->bridgeDir);
         $arch             = strtolower((string)php_uname('m'));
 
-        $nodeVersion = null;
-        if ($nodeBinary !== null && $execAllowed) {
-            $vOut = [];
-            $vCode = 1;
-            @exec('"' . $nodeBinary . '" -v 2>&1', $vOut, $vCode);
-            if ($vCode === 0 && !empty($vOut[0])) {
-                $nodeVersion = trim((string)$vOut[0]);
-            }
-        }
+        // Cache versi Node.js per path+mtime di disk agar tidak perlu spawn proses V8 di setiap load!
+        $nodeVersion = $nodeBinary !== null ? $this->getCachedNodeVersion($nodeBinary, $execAllowed, $forceRefresh) : null;
 
         $canAutoInstallNode = $curlLoaded && $bridgeWritable && (!$isWindows || $zipLoaded);
         $installState       = $this->readInstallState();
@@ -163,7 +161,7 @@ class BridgeManager
 
         $cronPhp = $phpCliBinary ?: ($isWindows ? 'php' : '/usr/local/bin/php');
 
-        return [
+        $this->cachedEnv = [
             'os'                   => $isWindows ? 'windows' : 'linux',
             'arch'                 => $arch,
             'php_version'          => PHP_VERSION,
@@ -193,10 +191,11 @@ class BridgeManager
             'recommendation_note'  => $reason,
             'target_base_url'      => $this->baseUrl,
         ];
+        return $this->cachedEnv;
     }
 
     /**
-     * Cek apakah service bridge merespon HTTP / status sesi terkini
+     * Cek apakah service bridge merespon HTTP / status sesi terkini (1 panggilan cURL saja!)
      */
     public function getStatus(): array
     {
@@ -207,14 +206,23 @@ class BridgeManager
         $pid      = $this->readPid();
         $pidAlive = $pid !== null && $this->isPidRunning($pid);
 
+        $raw       = is_array($health['raw'] ?? null) ? $health['raw'] : [];
+        $flavor    = $driver->getFlavor();
         $isRunning = (bool)($health['success'] ?? false);
         $errorMsg  = $health['error'] ?? null;
 
-        // Deteksi bentrok port di shared hosting (misal port 3000 dipakai akun cPanel lain)
-        if ($env['is_local_endpoint'] && !$this->isOurBridgeResponding()) {
-            $isRunning = false;
-            if ($this->isPortOpen('127.0.0.1', $this->port)) {
-                $errorMsg = "Port {$this->port} sedang dipakai aplikasi lain di server hosting. Klik '2. Jalankan Baileys' atau 'Ambil QR' untuk otomatis berpindah ke port bebas (38421+).";
+        // Verifikasi identitas bridge langsung dari payload $health['raw'] (0 cURL tambahan!)
+        if ($env['is_local_endpoint']) {
+            $verifiedOurs = $isRunning && (
+                $flavor === 'gowa'
+                    ? (array_key_exists('results', $raw) || array_key_exists('code', $raw))
+                    : (($raw['app'] ?? '') === 'ilmuna-wa-bridge' || (($raw['session'] ?? '') === $this->session && isset($raw['status'])))
+            );
+            if (!$verifiedOurs) {
+                $isRunning = false;
+                if ((int)($health['http_status'] ?? 0) > 0) {
+                    $errorMsg = "Port {$this->port} sedang dipakai aplikasi lain di server hosting. Klik '2. Jalankan Baileys' atau 'Ambil QR' untuk otomatis berpindah ke port bebas (38421+).";
+                }
             }
         }
 
@@ -224,13 +232,13 @@ class BridgeManager
         return [
             'running'     => $isRunning,
             'wa_status'   => $waStatus,
-            'driver'      => $driver->getFlavor(),
+            'driver'      => $flavor,
             'base_url'    => $this->baseUrl,
             'port'        => $this->port,
             'pid'         => $pidAlive ? $pid : null,
             'pid_alive'   => $pidAlive,
             'http_status' => (int)($health['http_status'] ?? 0),
-            'me'          => $isRunning && is_array($health['raw'] ?? null) ? ($health['raw']['me'] ?? null) : null,
+            'me'          => $isRunning ? ($raw['me'] ?? null) : null,
             'error'       => $errorMsg,
             'environment' => $env,
         ];
@@ -745,12 +753,12 @@ class BridgeManager
     /**
      * Status progres instalasi & log live untuk polling Dashboard Admin
      */
-    public function getInstallStatus(): array
+    public function getInstallStatus(?array $knownEnv = null, ?bool $knownRunning = null): array
     {
         $state    = $this->readInstallState();
         $instPid  = $this->readInstallerPid();
         $instLive = $instPid !== null && $this->isPidRunning($instPid);
-        $env      = $this->detectEnvironment();
+        $env      = $knownEnv ?? $this->detectEnvironment();
 
         // Jika status di JSON masih 'running' tapi prosesnya sudah selesai, perbarui otomatis
         if (($state['status'] ?? '') === 'running' && !$instLive) {
@@ -763,6 +771,10 @@ class BridgeManager
             }
         }
 
+        $portOpen = $knownRunning !== null
+            ? $knownRunning
+            : ($this->isLocalhostEndpoint($this->baseUrl) && $this->isOurBridgeResponding());
+
         return [
             'status'          => (string)($state['status'] ?? 'idle'),
             'phase'           => (string)($state['phase'] ?? 'idle'),
@@ -773,7 +785,7 @@ class BridgeManager
             'installer_pid'   => $instLive ? $instPid : null,
             'installer_log'   => $this->tailFile($this->installerLogFile, 80),
             'bridge_log'      => $this->tailLog(40),
-            'port_open'       => $this->isLocalhostEndpoint($this->baseUrl) && $this->isOurBridgeResponding(),
+            'port_open'       => $portOpen,
             'environment'     => $env,
         ];
     }
@@ -1024,15 +1036,16 @@ class BridgeManager
         $env    = $this->detectEnvironment();
         $driver = $this->buildBridgeDriver($env);
 
-        // Jika baru dinyalakan atau QR masih diproses Baileys, tunggu hingga maks 7,5 detik agar QR langsung tampil di klik pertama
-        $maxTries = $justStarted ? 5 : 2;
-        $qr       = $driver->getQrCode();
-        for ($attempt = 1; $attempt < $maxTries; $attempt++) {
-            if (!empty($qr['qr_data_url']) || ($qr['status'] ?? '') === 'connected') {
-                break;
+        // Jika baru saja dinyalakan, tunggu singkat maks 2,5 detik; jika sudah menyala, respon instan <30ms (auto-poll JS yang me-refresh)
+        $qr = $driver->getQrCode();
+        if ($justStarted && empty($qr['qr_data_url']) && ($qr['status'] ?? '') !== 'connected') {
+            for ($attempt = 0; $attempt < 2; $attempt++) {
+                usleep(1200000);
+                $qr = $driver->getQrCode();
+                if (!empty($qr['qr_data_url']) || ($qr['status'] ?? '') === 'connected') {
+                    break;
+                }
             }
-            usleep(1500000);
-            $qr = $driver->getQrCode();
         }
 
         return $qr;
@@ -1102,6 +1115,37 @@ class BridgeManager
         return is_dir($nm . DIRECTORY_SEPARATOR . '@whiskeysockets' . DIRECTORY_SEPARATOR . 'baileys')
             && is_dir($nm . DIRECTORY_SEPARATOR . 'qrcode')
             && is_dir($nm . DIRECTORY_SEPARATOR . 'pino');
+    }
+
+    /**
+     * Cache hasil `node -v` di disk (berdasarkan path + mtime) agar tidak spawn V8 di setiap page load
+     */
+    private function getCachedNodeVersion(string $nodeBinary, bool $execAllowed, bool $forceRefresh = false): ?string
+    {
+        $cacheFile = $this->runtimeDir . DIRECTORY_SEPARATOR . 'node_ver.cache';
+        $sig       = $nodeBinary . '|' . (string)(@filemtime($nodeBinary) ?: 0);
+
+        if (!$forceRefresh && is_file($cacheFile)) {
+            $cached = json_decode((string)@file_get_contents($cacheFile), true);
+            if (is_array($cached) && ($cached['sig'] ?? '') === $sig && !empty($cached['version'])) {
+                return (string)$cached['version'];
+            }
+        }
+
+        if (!$execAllowed) {
+            return null;
+        }
+
+        $vOut  = [];
+        $vCode = 1;
+        @exec('"' . $nodeBinary . '" -v 2>&1', $vOut, $vCode);
+        if ($vCode === 0 && !empty($vOut[0])) {
+            $ver = trim((string)$vOut[0]);
+            $this->ensureRuntimeDir();
+            @file_put_contents($cacheFile, json_encode(['sig' => $sig, 'version' => $ver]), LOCK_EX);
+            return $ver;
+        }
+        return null;
     }
 
     private function findGoWhatsAppBinary(bool $isWindows): ?string

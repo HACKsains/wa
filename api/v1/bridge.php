@@ -21,6 +21,8 @@ require_once dirname(__DIR__, 2) . '/config.php';
 
 // Autentikasi: boleh dari sesi Admin yang sudah login ATAU header HMAC-SHA256 valid
 $isAdminSession = !empty($_SESSION['wa_admin_logged_in']);
+// Lepas session file lock segera agar polling QR / status / navigasi tidak saling memblokir!
+wa_release_session_lock();
 $headers        = wa_get_request_headers();
 $rawBody        = (string)file_get_contents('php://input');
 $isHmacValid    = wa_verify_hmac(

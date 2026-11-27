@@ -16,6 +16,8 @@ $pageTitle     = $pageTitle ?? 'Overview Live';
 $pageIcon      = $pageIcon ?? 'solar:home-2-bold';
 $currentScript = basename($_SERVER['PHP_SELF'] ?? 'index.php');
 $csrfToken     = wa_csrf_token();
+// Lepas session lock setelah token CSRF siap agar request AJAX lazy-load langsung paralel!
+wa_release_session_lock();
 
 $initials = '';
 foreach (preg_split('/\s+/', trim($admin['name'])) ?: [] as $part) {
@@ -46,16 +48,17 @@ $navItems = [
     <?= renderFavicon() ?>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600&family=Outfit:wght@600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600&family=Outfit:wght@600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
+    <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600&family=Outfit:wght@600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"></noscript>
     <?= renderIconifyScript() ?>
     <link rel="stylesheet" href="<?= htmlspecialchars(BASE_URL) ?>/assets/css/lumina-wa.css?v=<?= @filemtime(BASE_PATH . '/assets/css/lumina-wa.css') ?: 1 ?>">
     <script>
         window.ILMUNA_BASE_URL = <?= json_encode(BASE_URL) ?>;
         window.WA_CSRF_TOKEN   = <?= json_encode($csrfToken) ?>;
     </script>
-    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/alert.js" defer></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/alert.js?v=<?= @filemtime(BASE_PATH . '/assets/js/alert.js') ?: 1 ?>" defer></script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/wa-panel.js?v=<?= @filemtime(BASE_PATH . '/assets/js/wa-panel.js') ?: 1 ?>" defer></script>
-    <?php loadCentralTemplates(['modal', 'calendar', 'table']); ?>
+    <?php loadCentralTemplates($pageTemplates ?? ['modal', 'table']); ?>
 </head>
 <body>
 <div class="wa-shell">

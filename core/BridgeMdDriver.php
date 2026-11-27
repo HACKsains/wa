@@ -762,13 +762,16 @@ class BridgeMdDriver implements TransportInterface
             return ['ok' => false, 'http_status' => 0, 'data' => null, 'error' => 'Ekstensi PHP cURL tidak aktif.'];
         }
 
+        $host = strtolower((string)(parse_url($url, PHP_URL_HOST) ?? ''));
+        $isLocal = in_array($host, ['127.0.0.1', 'localhost', '::1'], true);
+
         $ch = curl_init($url);
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_CUSTOMREQUEST  => strtoupper($method),
             CURLOPT_HTTPHEADER     => $headers,
-            CURLOPT_CONNECTTIMEOUT => 5,
-            CURLOPT_TIMEOUT        => 15,
+            CURLOPT_CONNECTTIMEOUT => $isLocal ? 1 : 5,
+            CURLOPT_TIMEOUT        => $isLocal ? 3 : 15,
         ]);
 
         if ($payload !== null) {

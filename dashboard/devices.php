@@ -165,7 +165,8 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === '1') {
         $mgr       = new BridgeManager($pdo);
         $bridgeSt  = $mgr->getStatus();
         $env       = $bridgeSt['environment'];
-        $installSt = $mgr->getInstallStatus();
+        // Reuse $env & $bridgeSt['running'] agar 0 exec tambahan & 0 cURL ganda!
+        $installSt = $mgr->getInstallStatus($env, (bool)$bridgeSt['running']);
         $phpBin    = $env['php_cli_binary'] ?: '/usr/local/bin/php';
 
         wa_json_response(true, 'Data device berhasil dimuat.', [
@@ -865,6 +866,12 @@ document.addEventListener('DOMContentLoaded', function () {
         renderReadiness(env, d.bridge_status, d.install_status);
         if (d.install_status && (d.install_status.status === 'running' || d.install_status.installer_alive)) {
             startInstallPolling();
+        }
+        // Jika Baileys sudah aktif & menunggu scan QR, tampilkan QR langsung tanpa perlu klik ulang!
+        if (d.bridge_status && d.bridge_status.running && d.bridge_status.wa_status === 'qr_pending' && !qrPollTimer) {
+            fetchQr(true);
+        } else if (d.bridge_status && d.bridge_status.running && d.bridge_status.wa_status === 'connected') {
+            document.getElementById('qrPreviewBox').innerHTML = '<iconify-icon icon="solar:check-circle-bold" width="52" style="color:#10B981;"></iconify-icon><strong style="color:#047857;font-size:15px;">WhatsApp Baileys Terhubung!</strong>';
         }
 
         document.getElementById('envDiagBox').innerHTML = `

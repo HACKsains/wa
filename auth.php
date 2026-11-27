@@ -97,7 +97,14 @@ function wa_require_admin(bool $isAjax = false): array
         exit;
     }
 
-    return wa_current_admin();
+    $admin = wa_current_admin();
+
+    // Lepas session lock pada GET AJAX read-only agar request paralel tidak saling tunggu
+    if ($isAjax && strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET')) === 'GET') {
+        wa_release_session_lock();
+    }
+
+    return $admin;
 }
 
 /**
@@ -115,6 +122,9 @@ function wa_require_csrf_ajax(?array $jsonBody = null): void
     if (!wa_verify_csrf($token)) {
         wa_json_response(false, 'Token keamanan CSRF tidak valid. Muat ulang halaman dan coba lagi.', [], 403);
     }
+
+    // Setelah CSRF diverifikasi, lepas session lock agar aksi POST berat tidak membekukan tab lain
+    wa_release_session_lock();
 }
 
 /**
