@@ -895,6 +895,7 @@ class BridgeManager
                 'BRIDGE_API_KEY'        => $this->apiKey,
                 'BRIDGE_WEBHOOK_URL'    => $webhookUrl,
                 'BRIDGE_WEBHOOK_SECRET' => $this->webhookSecret,
+                'BRIDGE_ANTI_CALL'      => wa_get_setting('anti_call_enabled', '1', $this->pdo) === '1' ? '1' : '0',
             ];
             $serverJs = $this->bridgeDir . DIRECTORY_SEPARATOR . 'server.js';
             // Hemat RAM & thread (192MB heap, 1 V8 pool) agar ramah CloudLinux LVE shared hosting cPanel

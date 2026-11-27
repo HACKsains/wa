@@ -22,10 +22,22 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === '1') {
             $act = strtolower(trim((string)($body['action'] ?? '')));
 
             if ($act === 'save_settings') {
-                wa_set_setting('anti_call_enabled', !empty($body['anti_call_enabled']) ? '1' : '0', $pdo);
+                $isEnabled = !empty($body['anti_call_enabled']);
+                wa_set_setting('anti_call_enabled', $isEnabled ? '1' : '0', $pdo);
                 wa_set_setting('anti_call_reply_text', trim((string)($body['anti_call_reply_text'] ?? '')), $pdo);
                 wa_set_setting('anti_call_spam_limit', (string)max(1, (int)($body['anti_call_spam_limit'] ?? 3)), $pdo);
                 wa_set_setting('anti_call_spam_window_minutes', (string)max(1, (int)($body['anti_call_spam_window_minutes'] ?? 5)), $pdo);
+
+                // Sinkron live ke Baileys bridge agar Instant Auto-Reject langsung mengikuti toggle tanpa restart
+                try {
+                    $bridgeDrv = TransportFactory::create($pdo)->getBridgeDriver();
+                    if ($bridgeDrv !== null && method_exists($bridgeDrv, 'syncAntiCallConfig')) {
+                        $bridgeDrv->syncAntiCallConfig($isEnabled);
+                    }
+                } catch (Throwable $e) {
+                    // Non-blocking jika bridge sedang offline
+                }
+
                 wa_json_response(true, 'Pengaturan Anti-Call berhasil diperbarui.');
             }
 

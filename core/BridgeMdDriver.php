@@ -492,6 +492,14 @@ class BridgeMdDriver implements TransportInterface
         ]);
     }
 
+    public function syncAntiCallConfig(bool $enabled): array
+    {
+        return $this->dispatchBridge('POST', '/api/config/anti-call', [
+            'session' => $this->session,
+            'enabled' => $enabled,
+        ]);
+    }
+
     public function healthCheck(): array
     {
         if ($this->dryRun) {

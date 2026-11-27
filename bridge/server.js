@@ -61,6 +61,8 @@ const WEBHOOK_URL = process.env.BRIDGE_WEBHOOK_URL || 'http://localhost/wa%20bot
 const WEBHOOK_SECRET = process.env.BRIDGE_WEBHOOK_SECRET || 'ilmuna_md_webhook_secret_2026';
 const AUTH_DIR = path.join(__dirname, 'auth_info', SESSION);
 
+let antiCallEnabled = process.env.BRIDGE_ANTI_CALL !== '0';
+
 let sock = null;
 let connectionStatus = 'disconnected'; // disconnected | qr_pending | connected | idle
 let latestQrRaw = null;
@@ -69,6 +71,25 @@ let connectedMe = null;
 let reconnecting = false;
 let consecutiveQrTimeouts = 0;
 let lastWebhookStatus = null;
+
+// Cache panggilan aktif: simpan JID mentah `c.from` (wajib sama persis utk `rejectCall`, termasuk @lid)
+// + set idempotensi agar reject tidak dipanggil dua kali pada offer -> ringing / callback PHP
+const callRawFromMap = new Map();
+const handledCallIds = new Set();
+const rejectedCallIds = new Set();
+function rememberBoundedSet(set, value, maxSize = 200) {
+  set.add(value);
+  if (set.size > maxSize) {
+    set.delete(set.values().next().value);
+  }
+}
+function rememberCallRawFrom(callId, rawFrom) {
+  if (!callId || !rawFrom) return;
+  callRawFromMap.set(callId, rawFrom);
+  if (callRawFromMap.size > 200) {
+    callRawFromMap.delete(callRawFromMap.keys().next().value);
+  }
+}
 
 // Cache retry Signal ringan (kompatibel interface NodeCache tanpa paket tambahan)
 function createRetryCache(maxEntries = 1000) {
@@ -235,7 +256,7 @@ async function initWhatsApp() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  // Kumpulkan pemetaan LID -> Nomor HP dari daftar kontak & sinkronisasi
+  // Kumpulkan pemetaan LID -> Nomor HP dari daftar kontak, sinkronisasi, & lid-mapping
   sock.ev.on('contacts.upsert', (contacts) => {
     for (const c of contacts || []) {
       if (c?.lid && c?.id) rememberLidMapping(c.lid, c.id);
@@ -244,6 +265,18 @@ async function initWhatsApp() {
   sock.ev.on('contacts.update', (updates) => {
     for (const c of updates || []) {
       if (c?.lid && c?.id) rememberLidMapping(c.lid, c.id);
+    }
+  });
+  sock.ev.on('lid-mapping.update', (mapping) => {
+    if (mapping && typeof mapping === 'object') {
+      if (mapping.lid && mapping.pn) rememberLidMapping(mapping.lid, mapping.pn);
+      for (const [k, v] of Object.entries(mapping)) {
+        if (String(k).endsWith('@lid') && String(v).endsWith('@s.whatsapp.net')) {
+          rememberLidMapping(k, v);
+        } else if (String(v).endsWith('@lid') && String(k).endsWith('@s.whatsapp.net')) {
+          rememberLidMapping(v, k);
+        }
+      }
     }
   });
 
@@ -318,20 +351,57 @@ async function initWhatsApp() {
     }
   });
 
-  // 1. Tangkap panggilan masuk (Voice & Video) -> kirim ke Anti-Call PHP
+  // 1. Tangkap panggilan masuk (Voice & Video) -> INSTANT REJECT (<10ms) dgn JID mentah + teruskan ke Anti-Call PHP
   sock.ev.on('call', async (callEvents) => {
     for (const c of callEvents || []) {
-      if (c.status === 'offer') {
-        const callerJid = resolveJidFromLid(c.from, c.callerPn || c.chatId);
-        console.log(`[WA:CALL] Panggilan ${c.isVideo ? 'video' : 'suara'} dari ${callerJid}`);
-        await forwardWebhook('call.offer', {
-          call_id: c.id,
-          from: callerJid,
-          isVideo: Boolean(c.isVideo),
-          call_type: c.isVideo ? 'video' : 'voice',
-          timestamp: Math.floor(Date.now() / 1000),
-        });
+      if (!c || !c.id) continue;
+      console.log(
+        `[WA:CALL] status=${c.status} id=${c.id} from=${c.from || ''} chatId=${c.chatId || ''} callerPn=${c.callerPn || ''} video=${Boolean(c.isVideo)}`
+      );
+
+      if (c.status !== 'offer' && c.status !== 'ringing') continue;
+      if (handledCallIds.has(c.id)) continue;
+      rememberBoundedSet(handledCallIds, c.id);
+
+      const rawFrom = String(c.from || c.chatId || '').trim();
+      rememberCallRawFrom(c.id, rawFrom);
+
+      // Instant Reject langsung dari Baileys memakai `c.from` MENTAH (mendukung @lid & :deviceId 100%!)
+      let rejectedNow = false;
+      if (antiCallEnabled && rawFrom) {
+        try {
+          await sock.rejectCall(c.id, rawFrom);
+          rejectedNow = true;
+          rememberBoundedSet(rejectedCallIds, c.id);
+          console.log(`[WA:CALL] Auto-reject instan berhasil: id=${c.id} from=${rawFrom}`);
+        } catch (err) {
+          console.error(`[WA:CALL] Gagal auto-reject (${rawFrom}):`, err.message);
+          // Fallback bila `chatId` berbeda dari `from` (mis. group/LID call)
+          if (c.chatId && c.chatId !== rawFrom) {
+            try {
+              await sock.rejectCall(c.id, c.chatId);
+              rejectedNow = true;
+              rememberBoundedSet(rejectedCallIds, c.id);
+              console.log(`[WA:CALL] Auto-reject fallback berhasil via chatId=${c.chatId}`);
+            } catch (err2) {
+              console.error(`[WA:CALL] Fallback reject gagal (${c.chatId}):`, err2.message);
+            }
+          }
+        }
       }
+
+      const altPn = c.callerPn || (c.chatId && String(c.chatId).endsWith('@s.whatsapp.net') ? c.chatId : '');
+      const callerJid = resolveJidFromLid(rawFrom, altPn);
+
+      await forwardWebhook('call.offer', {
+        call_id: c.id,
+        from: callerJid,
+        raw_from: rawFrom,
+        already_rejected: rejectedNow,
+        isVideo: Boolean(c.isVideo),
+        call_type: c.isVideo ? 'video' : 'voice',
+        timestamp: Math.floor(Date.now() / 1000),
+      });
     }
   });
 
@@ -576,6 +646,7 @@ const server = http.createServer(async (req, res) => {
         status: connectionStatus,
         me: connectedMe,
         port: PORT,
+        anti_call_enabled: antiCallEnabled,
         uptime_sec: Math.floor(process.uptime()),
       });
     }
@@ -640,6 +711,14 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, { success: true, status: 'shutting_down' });
       setTimeout(() => gracefulShutdown('HTTP_SHUTDOWN'), 100);
       return;
+    }
+
+    // 3D. Sinkron toggle Anti-Call secara live dari Dashboard PHP tanpa perlu restart bridge
+    if (method === 'POST' && pathname === '/api/config/anti-call') {
+      const cfg = await readJsonBody(req);
+      antiCallEnabled = Boolean(cfg.enabled);
+      console.log(`[WA:CONFIG] Instant Anti-Call auto-reject = ${antiCallEnabled ? 'ON' : 'OFF'}`);
+      return sendJson(res, 200, { success: true, anti_call_enabled: antiCallEnabled });
     }
 
     // Pastikan WhatsApp terhubung untuk aksi kirim/moderasi
@@ -738,11 +817,16 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { success: true, result: resp });
     }
 
-    // 11. Tolak Panggilan Masuk (Anti-Call)
+    // 11. Tolak Panggilan Masuk (Anti-Call — gunakan JID mentah `callRawFromMap` & hindari reject ganda)
     if (method === 'POST' && pathname === '/api/calls/reject') {
       const callId = String(body.callId || '');
-      const from = normalizeJid(body.from);
+      if (callId && rejectedCallIds.has(callId)) {
+        return sendJson(res, 200, { success: true, rejected: callId, already_rejected: true });
+      }
+      const from = (callId && callRawFromMap.get(callId)) || normalizeJid(body.from);
       await sock.rejectCall(callId, from);
+      if (callId) rememberBoundedSet(rejectedCallIds, callId);
+      console.log(`[WA:CALL] Rejected via API: id=${callId} from=${from}`);
       return sendJson(res, 200, { success: true, rejected: callId });
     }
 
