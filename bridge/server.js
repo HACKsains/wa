@@ -44,11 +44,13 @@ const WEBHOOK_SECRET = process.env.BRIDGE_WEBHOOK_SECRET || 'ilmuna_md_webhook_s
 const AUTH_DIR = path.join(__dirname, 'auth_info', SESSION);
 
 let sock = null;
-let connectionStatus = 'disconnected'; // disconnected | qr_pending | connected
+let connectionStatus = 'disconnected'; // disconnected | qr_pending | connected | idle
 let latestQrRaw = null;
 let latestQrDataUrl = null;
 let connectedMe = null;
 let reconnecting = false;
+let consecutiveQrTimeouts = 0;
+let lastWebhookStatus = null;
 
 // Simpan metadata key pesan grup sementara (maks 500 pesan) agar revoke/delete 100% akurat
 const recentGroupMessageKeys = new Map();
@@ -114,40 +116,65 @@ async function initWhatsApp() {
       latestQrRaw = qr;
       connectionStatus = 'qr_pending';
       try {
-        latestQrDataUrl = await QRCode.toDataURL(qr, { width: 320, margin: 2 });
+        latestQrDataUrl = await QRCode.toDataURL(qr, { width: 300, margin: 2 });
       } catch {
         latestQrDataUrl = null;
       }
-      console.log(`[WA:${SESSION}] QR baru tersedia — pindai dari Dashboard Admin PHP.`);
-      await forwardWebhook('session.status', { status: 'qr_pending', session: SESSION });
+      // Jangan spam HTTPS webhook setiap rotasi QR 20 detik (hemat CPU & LVE shared cPanel!)
+      if (lastWebhookStatus !== 'qr_pending') {
+        lastWebhookStatus = 'qr_pending';
+        console.log(`[WA:${SESSION}] QR tersedia — pindai dari Dashboard Admin PHP.`);
+      }
     }
 
     if (connection === 'open') {
       connectionStatus = 'connected';
+      consecutiveQrTimeouts = 0;
       latestQrRaw = null;
       latestQrDataUrl = null;
       connectedMe = sock.user || null;
       console.log(`[WA:${SESSION}] Terhubung sebagai ${connectedMe?.id || 'unknown'}`);
-      await forwardWebhook('session.status', {
-        status: 'connected',
-        session: SESSION,
-        me: connectedMe,
-      });
+      if (lastWebhookStatus !== 'connected') {
+        lastWebhookStatus = 'connected';
+        await forwardWebhook('session.status', {
+          status: 'connected',
+          session: SESSION,
+          me: connectedMe,
+        });
+      }
     }
 
     if (connection === 'close') {
+      const wasConnected = connectionStatus === 'connected';
       connectionStatus = 'disconnected';
+      latestQrRaw = null;
+      latestQrDataUrl = null;
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const loggedOut = statusCode === DisconnectReason.loggedOut;
       console.warn(`[WA:${SESSION}] Koneksi tertutup (code=${statusCode}, loggedOut=${loggedOut})`);
-      await forwardWebhook('session.status', { status: 'disconnected', session: SESSION });
+
+      if (wasConnected && lastWebhookStatus !== 'disconnected') {
+        lastWebhookStatus = 'disconnected';
+        await forwardWebhook('session.status', { status: 'disconnected', session: SESSION });
+      }
+
+      // Jika belum pernah dipindai & timeout QR (408) berturut-turut 3x, masuk mode hemat CPU (idle)
+      // dan otomatis bangun kembali saat Admin klik "Ambil QR" / "Pairing 8-Digit"!
+      if (!wasConnected && (statusCode === 408 || statusCode === 428)) {
+        consecutiveQrTimeouts += 1;
+        if (consecutiveQrTimeouts >= 3) {
+          connectionStatus = 'idle';
+          console.log(`[WA:${SESSION}] QR belum dipindai (3x timeout). Masuk mode hemat CPU hingga Admin klik Ambil QR.`);
+          return;
+        }
+      }
 
       if (!loggedOut && !reconnecting) {
         reconnecting = true;
         setTimeout(() => {
           reconnecting = false;
           initWhatsApp().catch((e) => console.error('[WA] Reconnect error:', e.message));
-        }, 3000);
+        }, 4000);
       }
     }
   });
@@ -310,8 +337,19 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // 2. Ambil QR Code (PNG Data URL)
+    // 2. Ambil QR Code (PNG Data URL) — bangunkan otomatis jika sedang mode hemat CPU (idle)
     if (method === 'GET' && /^\/api\/sessions\/[^/]+\/qr$/.test(pathname)) {
+      if ((connectionStatus === 'idle' || connectionStatus === 'disconnected') && !reconnecting) {
+        consecutiveQrTimeouts = 0;
+        reconnecting = true;
+        initWhatsApp()
+          .catch((e) => console.error('[WA Wake Error]:', e.message))
+          .finally(() => { reconnecting = false; });
+        // Tunggu sebentar agar QR pertama sempat terbit
+        for (let i = 0; i < 6 && !latestQrDataUrl && connectionStatus !== 'connected'; i++) {
+          await new Promise((r) => setTimeout(r, 500));
+        }
+      }
       return sendJson(res, 200, {
         app: 'ilmuna-wa-bridge',
         session: SESSION,
@@ -325,11 +363,16 @@ const server = http.createServer(async (req, res) => {
     if (method === 'POST' && /^\/api\/sessions\/[^/]+\/pairing-code$/.test(pathname)) {
       const body = await readJsonBody(req);
       const phone = String(body.phone || '').replace(/\D+/g, '');
-      if (!sock || !phone) {
-        return sendJson(res, 400, { error: 'Socket belum siap atau nomor HP kosong.' });
+      if (!phone) {
+        return sendJson(res, 400, { error: 'Nomor HP kosong.' });
       }
       if (connectionStatus === 'connected') {
         return sendJson(res, 409, { error: 'WhatsApp sudah terhubung.' });
+      }
+      if (!sock || connectionStatus === 'idle' || connectionStatus === 'disconnected') {
+        consecutiveQrTimeouts = 0;
+        await initWhatsApp();
+        await new Promise((r) => setTimeout(r, 2000));
       }
       const rawCode = await sock.requestPairingCode(phone);
       const formatted = String(rawCode || '').replace(/(.{4})(?=.)/g, '$1-');

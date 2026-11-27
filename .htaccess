@@ -147,3 +147,7 @@ Options -Indexes
         Deny from all
     </IfModule>
 </FilesMatch>
+
+<IfModule Litespeed>
+    SetEnv noabort 1
+</IfModule>

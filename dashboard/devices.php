@@ -626,6 +626,7 @@ document.addEventListener('DOMContentLoaded', function () {
     let cachedLogs = { installer: '', bridge: '' };
     let installPollTimer = null;
     let qrPollTimer = null;
+    let qrPollCount = 0;
     const tbody = document.getElementById('devicesTbody');
 
     function setChipStyle(icoEl, ok, warn) {
@@ -721,6 +722,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     function stopQrPolling() {
         if (qrPollTimer) { clearInterval(qrPollTimer); qrPollTimer = null; }
+        qrPollCount = 0;
     }
 
     function startInstallPolling() {
@@ -746,6 +748,13 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     async function fetchQr(enableAutoPoll) {
+        if (!enableAutoPoll && document.hidden) return;
+        if (!enableAutoPoll) {
+            qrPollCount++;
+            if (qrPollCount > 20) { stopQrPolling(); return; }
+        } else {
+            qrPollCount = 0;
+        }
         const box = document.getElementById('qrPreviewBox');
         if (!qrPollTimer) {
             box.innerHTML = '<iconify-icon icon="solar:refresh-circle-bold" class="ilmuna-spin" width="32"></iconify-icon><span>Menghubungi Baileys via PHP untuk mengambil QR...</span>';
@@ -754,9 +763,9 @@ document.addEventListener('DOMContentLoaded', function () {
         const d = res.data || {};
         if (res.success && d.qr_data_url) {
             box.innerHTML = `<img src="${WaPanel.escape(d.qr_data_url)}" alt="QR WhatsApp" loading="lazy" draggable="false">
-                <div style="font-size:12.5px;color:#047857;font-weight:700;">Pindai QR ini dari WhatsApp → Perangkat Tertaut (Auto-refresh aktif)</div>`;
+                <div style="font-size:12.5px;color:#047857;font-weight:700;">Pindai QR ini dari WhatsApp → Perangkat Tertaut (Auto-refresh 8 detik)</div>`;
             if (enableAutoPoll && !qrPollTimer) {
-                qrPollTimer = setInterval(() => fetchQr(false), 5000);
+                qrPollTimer = setInterval(() => fetchQr(false), 8000);
             }
         } else if (d.status === 'connected') {
             stopQrPolling();
@@ -765,8 +774,7 @@ document.addEventListener('DOMContentLoaded', function () {
         } else {
             box.innerHTML = `<iconify-icon icon="solar:info-circle-bold" width="40" style="color:#D97706;"></iconify-icon><div style="font-size:13px;color:#92400E;">${WaPanel.escape(res.message || 'Baileys belum siap. Pastikan Step 1 & Step 2 sudah selesai.')}</div>`;
             if (enableAutoPoll && res.success && !qrPollTimer) {
-                // Bridge sedang startup handshake -> coba lagi otomatis dalam 4 detik
-                qrPollTimer = setInterval(() => fetchQr(false), 4500);
+                qrPollTimer = setInterval(() => fetchQr(false), 6000);
             }
         }
     }

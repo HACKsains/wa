@@ -325,7 +325,7 @@ if (!class_exists('MargoOneSsoClient')) {
         /**
          * Verifikasi incoming Back-Channel SLO Webhook dari Margo One SSO
          */
-        public function handleLogoutWebhook($rawBody = null, array $headers = null)
+        public function handleLogoutWebhook($rawBody = null, ?array $headers = null)
         {
             if ($rawBody === null) {
                 $rawBody = (string)file_get_contents('php://input');

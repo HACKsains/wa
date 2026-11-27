@@ -889,6 +889,7 @@ class BridgeManager
             $envVars = [
                 'HOME'                  => $homeDir,
                 'NODE_ENV'              => 'production',
+                'UV_THREADPOOL_SIZE'    => '2',
                 'BRIDGE_PORT'           => (string)$this->port,
                 'BRIDGE_SESSION'        => $this->session,
                 'BRIDGE_API_KEY'        => $this->apiKey,
@@ -896,8 +897,8 @@ class BridgeManager
                 'BRIDGE_WEBHOOK_SECRET' => $this->webhookSecret,
             ];
             $serverJs = $this->bridgeDir . DIRECTORY_SEPARATOR . 'server.js';
-            // Batasi V8 heap ke 256MB agar ramah CloudLinux LVE di shared hosting cPanel
-            $cmd = sprintf('"%s" --max-old-space-size=256 "%s"', $env['node_binary'], $serverJs);
+            // Hemat RAM & thread (192MB heap, 1 V8 pool) agar ramah CloudLinux LVE shared hosting cPanel
+            $cmd = sprintf('"%s" --max-old-space-size=192 "%s"', $env['node_binary'], $serverJs);
             $pid = $this->spawnDetachedProcess($cmd, $this->bridgeDir, $isWindows, $envVars, $this->logFile);
             $this->updateBridgeFlavor('generic');
         }
@@ -967,20 +968,26 @@ class BridgeManager
      */
     public function stop(): array
     {
-        $pid = $this->readPid();
-        if ($pid === null) {
-            return ['success' => true, 'message' => 'Tidak ada PID WA Bridge lokal yang tercatat aktif.'];
+        $pid       = $this->readPid();
+        $isWindows = DIRECTORY_SEPARATOR === '\\';
+
+        if ($pid !== null) {
+            if ($isWindows) {
+                @exec("taskkill /F /T /PID {$pid} >NUL 2>&1");
+            } else {
+                @exec("kill -TERM {$pid} >/dev/null 2>&1");
+                usleep(300000);
+                if ($this->isPidRunning($pid)) {
+                    @exec("kill -KILL {$pid} >/dev/null 2>&1");
+                }
+            }
         }
 
-        $isWindows = DIRECTORY_SEPARATOR === '\\';
-        if ($isWindows) {
-            @exec("taskkill /F /T /PID {$pid} >NUL 2>&1");
-        } else {
-            @exec("kill -TERM {$pid} >/dev/null 2>&1");
-            usleep(300000);
-            if ($this->isPidRunning($pid)) {
-                @exec("kill -KILL {$pid} >/dev/null 2>&1");
-            }
+        // Di Linux cPanel, bersihkan juga proses yatim (orphan) yang menjalankan server.js milik direktori ini
+        // agar tidak ada beberapa proses Node menumpuk menghabiskan kuota RAM/NPROC CloudLinux!
+        if (!$isWindows) {
+            $serverJs = $this->bridgeDir . '/server.js';
+            @exec('pkill -f ' . escapeshellarg($serverJs) . ' >/dev/null 2>&1');
         }
 
         if (is_file($this->pidFile)) {
@@ -990,7 +997,9 @@ class BridgeManager
 
         return [
             'success' => true,
-            'message' => "Proses WA Bridge (PID {$pid}) berhasil dihentikan.",
+            'message' => $pid !== null
+                ? "Proses WA Bridge (PID {$pid}) berhasil dihentikan."
+                : 'Seluruh proses WA Bridge lokal telah dibersihkan.',
         ];
     }
 
