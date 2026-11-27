@@ -393,6 +393,13 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { success: true, status: 'logged_out' });
     }
 
+    // 3C. Graceful shutdown via HTTP agar PHP bisa menghentikan daemon dalam <5ms tanpa pkill hang
+    if (method === 'POST' && /^\/api\/sessions\/[^/]+\/shutdown$/.test(pathname)) {
+      sendJson(res, 200, { success: true, status: 'shutting_down' });
+      setTimeout(() => gracefulShutdown('HTTP_SHUTDOWN'), 100);
+      return;
+    }
+
     // Pastikan WhatsApp terhubung untuk aksi kirim/moderasi
     if (!sock || connectionStatus !== 'connected') {
       return sendJson(res, 503, { error: `WhatsApp belum terhubung (status: ${connectionStatus}).` });

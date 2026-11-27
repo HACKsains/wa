@@ -971,23 +971,45 @@ class BridgeManager
         $pid       = $this->readPid();
         $isWindows = DIRECTORY_SEPARATOR === '\\';
 
+        // 1. Minta daemon berhenti bersih lewat HTTP (<50ms, aman tanpa sentuh proses lain)
+        if ($this->isLocalhostEndpoint($this->baseUrl) && function_exists('curl_init')) {
+            $headers = ['Content-Type: application/json'];
+            if ($this->apiKey !== '') {
+                $headers[] = 'X-Api-Key: ' . $this->apiKey;
+                $headers[] = 'Authorization: Bearer ' . $this->apiKey;
+            }
+            $ch = curl_init($this->baseUrl . '/api/sessions/' . rawurlencode($this->session) . '/shutdown');
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST           => true,
+                CURLOPT_POSTFIELDS     => '{}',
+                CURLOPT_HTTPHEADER     => $headers,
+                CURLOPT_CONNECTTIMEOUT => 1,
+                CURLOPT_TIMEOUT        => 2,
+            ]);
+            @curl_exec($ch);
+            curl_close($ch);
+            usleep(250000);
+        }
+
+        // 2. Pastikan PID tercatat benar-benar mati
         if ($pid !== null) {
             if ($isWindows) {
                 @exec("taskkill /F /T /PID {$pid} >NUL 2>&1");
             } else {
                 @exec("kill -TERM {$pid} >/dev/null 2>&1");
-                usleep(300000);
+                usleep(200000);
                 if ($this->isPidRunning($pid)) {
                     @exec("kill -KILL {$pid} >/dev/null 2>&1");
                 }
             }
         }
 
-        // Di Linux cPanel, bersihkan juga proses yatim (orphan) yang menjalankan server.js milik direktori ini
-        // agar tidak ada beberapa proses Node menumpuk menghabiskan kuota RAM/NPROC CloudLinux!
+        // 3. Di Linux cPanel, bersihkan juga proses yatim dengan pola `[s]erver.js`
+        //    (tanda kurung siku `[s]` mencegah pkill membunuh subshell dirinya sendiri!)
         if (!$isWindows) {
-            $serverJs = $this->bridgeDir . '/server.js';
-            @exec('pkill -f ' . escapeshellarg($serverJs) . ' >/dev/null 2>&1');
+            $pattern = $this->bridgeDir . '/[s]erver.js';
+            @exec('pkill -f ' . escapeshellarg($pattern) . ' >/dev/null 2>&1');
         }
 
         if (is_file($this->pidFile)) {
@@ -999,7 +1021,7 @@ class BridgeManager
             'success' => true,
             'message' => $pid !== null
                 ? "Proses WA Bridge (PID {$pid}) berhasil dihentikan."
-                : 'Seluruh proses WA Bridge lokal telah dibersihkan.',
+                : 'Seluruh proses WA Bridge lokal telah dihentikan.',
         ];
     }
 
@@ -1504,14 +1526,18 @@ class BridgeManager
             return ctype_digit($pidStr) ? (int)$pidStr : null;
         }
 
-        // Linux / cPanel background detached process (nohup ... & echo $!)
+        // Linux / cPanel background detached process:
+        // Tutup semua file descriptor warisan (>2, termasuk socket LiteSpeed lsphp & MySQL!)
+        // sebelum men-spawn proses latar belakang agar request PHP tidak pernah menggantung / ERR_CONNECTION_CLOSED!
         $envPrefix = '';
         foreach ($envVars as $k => $v) {
             $envPrefix .= $k . '=' . escapeshellarg($v) . ' ';
         }
+        $closeFds = 'for fd in /proc/$$/fd/*; do f=${fd##*/}; case "$f" in ""|*[!0-9]*) ;; *) [ "$f" -gt 2 ] && eval "exec ${f}>&-" 2>/dev/null ;; esac; done;';
         $linuxCmd = sprintf(
-            'cd %s && %snohup %s >> %s 2>&1 < /dev/null & echo $!',
+            'cd %s && ( %s %snohup %s >> %s 2>&1 </dev/null & echo $! )',
             escapeshellarg($cwd),
+            $closeFds,
             $envPrefix,
             $command,
             escapeshellarg($logDest)
