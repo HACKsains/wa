@@ -479,6 +479,19 @@ class BridgeMdDriver implements TransportInterface
         ]);
     }
 
+    public function unblockContact(string $phoneOrJid): array
+    {
+        $contactJid = $this->formatChatId($phoneOrJid);
+        if ($contactJid === '' || wa_is_group_jid($contactJid)) {
+            return $this->errorResult('Nomor kontak yang akan dibuka blokirnya tidak valid.');
+        }
+
+        return $this->dispatchBridge('POST', '/api/contacts/unblock', [
+            'session' => $this->session,
+            'chatId'  => $contactJid,
+        ]);
+    }
+
     public function healthCheck(): array
     {
         if ($this->dryRun) {

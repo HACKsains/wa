@@ -206,6 +206,14 @@ class TransportFactory implements TransportInterface
         return $this->bridgeDriver->blockContact($phoneOrJid);
     }
 
+    public function unblockContact(string $phoneOrJid): array
+    {
+        if ($this->bridgeDriver === null) {
+            return $this->noDriverResult($phoneOrJid, 'BridgeMdDriver tidak tersedia untuk unblockContact.');
+        }
+        return $this->bridgeDriver->unblockContact($phoneOrJid);
+    }
+
     public function healthCheck(): array
     {
         return [

@@ -116,6 +116,7 @@ class AntiCallEngine
 
     /**
      * Buka blokir nomor dari Admin Panel (`dashboard/anti-call.php`)
+     * Sekaligus membuka blokir di sisi WhatsApp (Baileys) bila bridge sedang aktif.
      */
     public function unblockContact(string $phoneRaw): bool
     {
@@ -126,7 +127,17 @@ class AntiCallEngine
         $stmt = $this->pdo->prepare(
             'UPDATE wa_contacts_cache SET is_blocked = 0 WHERE phone_e164 = :phone'
         );
-        return $stmt->execute([':phone' => $phone]);
+        $ok = $stmt->execute([':phone' => $phone]);
+
+        if (method_exists($this->transport, 'unblockContact')) {
+            try {
+                $this->transport->unblockContact($phone);
+            } catch (Throwable $e) {
+                // Abaikan bila bridge offline; status DB tetap terbuka
+            }
+        }
+
+        return $ok;
     }
 
     private function countRecentCalls(string $callerPhone, int $windowMinutes): int

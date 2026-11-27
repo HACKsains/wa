@@ -4,22 +4,21 @@
  * ==============================================================================
  * ILMUNA WA BOT — LIGHTWEIGHT SELF-HOSTED MULTI-DEVICE BRIDGE (BAILEYS)
  * ==============================================================================
- * Dijalankan otomatis oleh PHP via core/BridgeManager.php (atau manual: npm start).
+ * Dijalankan otomatis oleh PHP via core/BridgeManager.php (tanpa SSH/CLI!).
  * Tanpa Express / framework berat — murni Node.js `http` + Baileys + QRCode.
  *
- * Fitur:
- * - QR Code (Data URL PNG) & 8-digit Pairing Code via HTTP API
+ * Fitur Produksi:
+ * - Anti "Menunggu pesan ini...": dilengkapi `getMessage` store (1.000 pesan),
+ *   `msgRetryCounterCache`, & `makeCacheableSignalKeyStore` untuk Signal E2E!
+ * - Dukungan penuh WhatsApp `@lid` (`remoteJidAlt`, `senderPn`, `participantAlt`,
+ *   & pemetaan LID -> Nomor HP dari kontak)
+ * - Interactive Buttons / List -> menu bernomor rapi 100% instan di semua klien WA
+ *   + dukungan penuh Interactive Poll (`messageSecret` + `decryptPollVote`)
  * - Auto-forward webhook bertanda tangan HMAC-SHA256 ke PHP `webhook.php`:
- *   • call.offer (suara & video masuk -> untuk Anti-Call PHP)
+ *   • call.offer (suara & video masuk -> Anti-Call PHP)
  *   • group.message & message / button.reply / list.reply / poll.vote
- *   • session.status (connected / qr_pending / disconnected)
- * - Endpoint kontrol penuh untuk BridgeMdDriver.php:
- *   • GET  /api/sessions/:session/status
- *   • GET  /api/sessions/:session/qr
- *   • POST /api/sessions/:session/pairing-code
- *   • POST /api/sendText, /api/sendButtons, /api/sendPoll, /api/sendList, /api/sendMedia
- *   • POST /api/groups/deleteMessage, /api/groups/kick
- *   • POST /api/calls/reject, /api/contacts/block
+ *   • session.status (hanya saat transisi status nyata, hemat CPU/LVE cPanel)
+ * - Mode hemat CPU (`idle`) otomatis jika QR tidak dipindai 3x timeout
  * ==============================================================================
  */
 
@@ -29,7 +28,6 @@ const path = require('path');
 const fs = require('fs');
 
 // Saring spam debug internal `libsignal` ("Closing session: SessionEntry { privKey... }")
-// agar bridge.log tetap bersih & tidak menampilkan buffer kunci ratchet Signal di log!
 const _origInfo = console.info.bind(console);
 console.info = (...args) => {
   const first = typeof args[0] === 'string' ? args[0] : '';
@@ -53,6 +51,7 @@ const {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
+  getAggregateVotesInPollMessage,
 } = require('@whiskeysockets/baileys');
 
 const PORT = parseInt(process.env.BRIDGE_PORT || '38421', 10);
@@ -71,6 +70,83 @@ let reconnecting = false;
 let consecutiveQrTimeouts = 0;
 let lastWebhookStatus = null;
 
+// Cache retry Signal ringan (kompatibel interface NodeCache tanpa paket tambahan)
+function createRetryCache(maxEntries = 1000) {
+  const map = new Map();
+  return {
+    get(key) { return map.get(key); },
+    set(key, val) {
+      map.set(key, val);
+      if (map.size > maxEntries) {
+        const first = map.keys().next().value;
+        map.delete(first);
+      }
+      return true;
+    },
+    del(key) { map.delete(key); },
+    take(key) { const v = map.get(key); map.delete(key); return v; },
+    flushAll() { map.clear(); },
+  };
+}
+const msgRetryCounterCache = createRetryCache(1000);
+
+// Store pesan terkirim & masuk (maks 1.000) untuk `getMessage` Signal Retry Receipt & dekripsi Poll!
+// Wajib ada di Baileys agar penerima TIDAK PERNAH melihat "Menunggu pesan ini..."!
+const messageStore = new Map();
+function rememberMessage(msg) {
+  const id = msg?.key?.id;
+  if (!id || !msg?.message) return;
+  messageStore.set(id, msg);
+  if (messageStore.size > 1000) {
+    const oldest = messageStore.keys().next().value;
+    messageStore.delete(oldest);
+  }
+}
+
+// Pemetaan LID -> JID nomor HP asli + reverse lookup angka LID -> JID asli (@lid)
+const lidToPnMap = new Map();
+const lidDigitsToJid = new Map();
+function rememberLidMapping(lid, pnJid) {
+  if (!lid) return;
+  const cleanLid = String(lid).split(':')[0];
+  if (cleanLid.endsWith('@lid')) {
+    const lidDigits = cleanLid.split('@')[0].replace(/\D+/g, '');
+    if (lidDigits) {
+      lidDigitsToJid.set(lidDigits, cleanLid);
+      if (lidDigitsToJid.size > 2000) {
+        lidDigitsToJid.delete(lidDigitsToJid.keys().next().value);
+      }
+    }
+  }
+  if (!pnJid) return;
+  const cleanPn = String(pnJid).split(':')[0];
+  if (cleanLid.endsWith('@lid') && cleanPn.endsWith('@s.whatsapp.net')) {
+    lidToPnMap.set(cleanLid, cleanPn);
+    if (lidToPnMap.size > 2000) {
+      const oldest = lidToPnMap.keys().next().value;
+      lidToPnMap.delete(oldest);
+    }
+  }
+}
+
+function resolveJidFromLid(rawJid, altJid) {
+  const raw = String(rawJid || '').trim();
+  const alt = String(altJid || '').trim();
+  if (raw.endsWith('@lid')) {
+    rememberLidMapping(raw, alt && alt.endsWith('@s.whatsapp.net') ? alt : null);
+  }
+  if (alt && alt.endsWith('@s.whatsapp.net')) {
+    return alt.split(':')[0];
+  }
+  if (raw.endsWith('@lid')) {
+    const baseLid = raw.split(':')[0];
+    const mapped = lidToPnMap.get(baseLid) || lidToPnMap.get(raw);
+    if (mapped) return mapped;
+    return baseLid;
+  }
+  return raw;
+}
+
 // Simpan metadata key pesan grup sementara (maks 500 pesan) agar revoke/delete 100% akurat
 const recentGroupMessageKeys = new Map();
 function rememberMessageKey(msgId, key) {
@@ -80,6 +156,14 @@ function rememberMessageKey(msgId, key) {
     const oldest = recentGroupMessageKeys.keys().next().value;
     recentGroupMessageKeys.delete(oldest);
   }
+}
+
+// Helper kirim pesan + otomatis simpan ke messageStore (anti "Menunggu pesan ini...")
+async function sendWaMessage(jid, content, opts = {}) {
+  const sent = await sock.sendMessage(jid, content, opts);
+  if (sent) rememberMessage(sent);
+  console.log(`[WA:OUT] to=${jid} id=${sent?.key?.id || '-'}`);
+  return sent;
 }
 
 async function forwardWebhook(eventName, payloadObj) {
@@ -102,10 +186,23 @@ async function forwardWebhook(eventName, payloadObj) {
         'X-Webhook-Signature': sig,
       },
       body,
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(12000),
     });
+    const resText = await res.text().catch(() => '');
     if (!res.ok) {
-      console.error(`[Webhook] HTTP ${res.status} untuk event ${eventName}`);
+      console.error(`[Webhook] HTTP ${res.status} untuk event ${eventName}: ${resText.slice(0, 200)}`);
+    } else if (eventName !== 'session.status') {
+      let summary = 'ok';
+      try {
+        const j = JSON.parse(resText);
+        const firstRes = j?.data?.results?.[0];
+        if (firstRes) {
+          summary = `${firstRes.route_target || ''}:${firstRes.status || 'ok'}`;
+          const sendErr = firstRes?.detail?.send_result?.error || firstRes?.detail?.reply_result?.error;
+          if (sendErr) summary += ` (err: ${sendErr})`;
+        }
+      } catch {}
+      console.log(`[Webhook] OK ${eventName} -> ${summary}`);
     }
   } catch (err) {
     console.error(`[Webhook] Gagal kirim ${eventName} ke ${WEBHOOK_URL}:`, err.message);
@@ -129,9 +226,26 @@ async function initWhatsApp() {
     browser: ['Ilmuna WA Bot', 'Chrome', '1.0.0'],
     markOnlineOnConnect: false,
     syncFullHistory: false,
+    msgRetryCounterCache,
+    getMessage: async (key) => {
+      const stored = messageStore.get(key?.id);
+      return stored?.message || undefined;
+    },
   });
 
   sock.ev.on('creds.update', saveCreds);
+
+  // Kumpulkan pemetaan LID -> Nomor HP dari daftar kontak & sinkronisasi
+  sock.ev.on('contacts.upsert', (contacts) => {
+    for (const c of contacts || []) {
+      if (c?.lid && c?.id) rememberLidMapping(c.lid, c.id);
+    }
+  });
+  sock.ev.on('contacts.update', (updates) => {
+    for (const c of updates || []) {
+      if (c?.lid && c?.id) rememberLidMapping(c.lid, c.id);
+    }
+  });
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
@@ -144,7 +258,6 @@ async function initWhatsApp() {
       } catch {
         latestQrDataUrl = null;
       }
-      // Jangan spam HTTPS webhook setiap rotasi QR 20 detik (hemat CPU & LVE shared cPanel!)
       if (lastWebhookStatus !== 'qr_pending') {
         lastWebhookStatus = 'qr_pending';
         console.log(`[WA:${SESSION}] QR tersedia — pindai dari Dashboard Admin PHP.`);
@@ -157,6 +270,9 @@ async function initWhatsApp() {
       latestQrRaw = null;
       latestQrDataUrl = null;
       connectedMe = sock.user || null;
+      if (connectedMe?.lid && connectedMe?.id) {
+        rememberLidMapping(connectedMe.lid, connectedMe.id);
+      }
       console.log(`[WA:${SESSION}] Terhubung sebagai ${connectedMe?.id || 'unknown'}`);
       if (lastWebhookStatus !== 'connected') {
         lastWebhookStatus = 'connected';
@@ -182,8 +298,7 @@ async function initWhatsApp() {
         await forwardWebhook('session.status', { status: 'disconnected', session: SESSION });
       }
 
-      // Jika belum pernah dipindai & timeout QR (408) berturut-turut 3x, masuk mode hemat CPU (idle)
-      // dan otomatis bangun kembali saat Admin klik "Ambil QR" / "Pairing 8-Digit"!
+      // Hemat CPU cPanel: jika QR timeout 3x berturut-turut tanpa dipindai, masuk mode idle
       if (!wasConnected && (statusCode === 408 || statusCode === 428)) {
         consecutiveQrTimeouts += 1;
         if (consecutiveQrTimeouts >= 3) {
@@ -207,9 +322,11 @@ async function initWhatsApp() {
   sock.ev.on('call', async (callEvents) => {
     for (const c of callEvents || []) {
       if (c.status === 'offer') {
+        const callerJid = resolveJidFromLid(c.from, c.callerPn || c.chatId);
+        console.log(`[WA:CALL] Panggilan ${c.isVideo ? 'video' : 'suara'} dari ${callerJid}`);
         await forwardWebhook('call.offer', {
           call_id: c.id,
-          from: c.from,
+          from: callerJid,
           isVideo: Boolean(c.isVideo),
           call_type: c.isVideo ? 'video' : 'voice',
           timestamp: Math.floor(Date.now() / 1000),
@@ -218,30 +335,72 @@ async function initWhatsApp() {
     }
   });
 
-  // 2. Tangkap pesan masuk (Private, Grup, Button Reply, List Reply)
+  // 2. Tangkap klik Poll (pollUpdateMessage) dan teruskan sebagai poll.vote ke PHP
+  sock.ev.on('messages.update', async (updates) => {
+    for (const { key, update } of updates || []) {
+      if (!update?.pollUpdates || typeof getAggregateVotesInPollMessage !== 'function') continue;
+      const pollCreation = messageStore.get(key?.id);
+      if (!pollCreation?.message) continue;
+      try {
+        const votes = getAggregateVotesInPollMessage({
+          message: pollCreation.message,
+          pollUpdates: update.pollUpdates,
+        });
+        const chosen = (votes || []).find((v) => Array.isArray(v.voters) && v.voters.length > 0);
+        if (!chosen) continue;
+        const voterRaw = chosen.voters[chosen.voters.length - 1] || key.remoteJid || '';
+        const voterJid = resolveJidFromLid(voterRaw, key.remoteJidAlt);
+        if (!voterJid || voterJid === connectedMe?.id?.split(':')[0] + '@s.whatsapp.net') continue;
+        console.log(`[WA:POLL] from=${voterJid} option="${chosen.name}"`);
+        await forwardWebhook('poll.vote', {
+          id: `poll_${key.id}_${Date.now()}`,
+          chatId: voterJid,
+          from: voterJid,
+          fromMe: false,
+          type: 'poll_vote',
+          selectedOptions: [chosen.name],
+          body: chosen.name,
+          timestamp: Math.floor(Date.now() / 1000),
+        });
+      } catch (e) {
+        console.error('[WA:POLL] Gagal dekripsi vote:', e.message);
+      }
+    }
+  });
+
+  // 3. Tangkap pesan masuk (Private, Grup, Button Reply, List Reply)
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
     for (const m of messages || []) {
       if (!m.message || m.key?.fromMe) continue;
-      if (m.key?.remoteJid === 'status@broadcast') continue;
+      const rawRemoteJid = m.key?.remoteJid || '';
+      if (!rawRemoteJid || rawRemoteJid === 'status@broadcast' || rawRemoteJid.endsWith('@newsletter')) continue;
 
-      const rawRemoteJid = m.key.remoteJid || '';
+      rememberMessage(m);
+
       const isGroup = rawRemoteJid.endsWith('@g.us');
-      // Dukungan WhatsApp @lid terbaru: prioritaskan JID nomor HP asli (remoteJidAlt / participantAlt) bila tersedia
-      const remoteJid = !isGroup && rawRemoteJid.endsWith('@lid') && m.key.remoteJidAlt
-        ? m.key.remoteJidAlt
-        : rawRemoteJid;
+      const remoteJid = isGroup
+        ? rawRemoteJid
+        : resolveJidFromLid(rawRemoteJid, m.key.remoteJidAlt || m.key.senderPn);
       const rawParticipant = m.key.participant || '';
-      const resolvedParticipant = rawParticipant.endsWith('@lid') && m.key.participantAlt
-        ? m.key.participantAlt
-        : rawParticipant;
+      const resolvedParticipant = resolveJidFromLid(rawParticipant, m.key.participantAlt || m.key.senderPn);
       const msgId = m.key.id || '';
       if (isGroup && msgId) {
         rememberMessageKey(msgId, m.key);
       }
 
-      const content = m.message.ephemeralMessage?.message || m.message.viewOnceMessage?.message || m.message;
+      const content =
+        m.message.ephemeralMessage?.message ||
+        m.message.viewOnceMessage?.message ||
+        m.message.viewOnceMessageV2?.message ||
+        m.message;
+
+      // Abaikan protokol / reaksi kosong
+      if (content.protocolMessage || content.senderKeyDistributionMessage && !content.conversation && !content.extendedTextMessage) {
+        continue;
+      }
+
       let msgType = 'text';
       let text = '';
       let buttonId = null;
@@ -277,6 +436,8 @@ async function initWhatsApp() {
         text = content.videoMessage.caption || '';
       } else if (content.audioMessage) {
         msgType = 'audio';
+      } else {
+        continue;
       }
 
       const eventName = isGroup
@@ -287,10 +448,13 @@ async function initWhatsApp() {
             ? 'list.reply'
             : 'message';
 
+      const senderTarget = isGroup ? resolvedParticipant : remoteJid;
+      console.log(`[WA:IN] ${eventName} from=${senderTarget} text="${text.slice(0, 60)}"`);
+
       await forwardWebhook(eventName, {
         id: msgId,
         chatId: remoteJid,
-        from: isGroup ? resolvedParticipant : remoteJid,
+        from: senderTarget,
         participant: resolvedParticipant,
         pushName: m.pushName || '',
         fromMe: false,
@@ -307,12 +471,59 @@ async function initWhatsApp() {
 function normalizeJid(input) {
   const s = String(input || '').trim();
   if (!s) return '';
-  if (s.endsWith('@g.us') || s.endsWith('@s.whatsapp.net') || s.endsWith('@lid')) return s;
-  if (s.endsWith('@c.us')) return s.replace(/@c\.us$/, '@s.whatsapp.net');
-  const digits = s.replace(/\D+/g, '');
+  if (s.endsWith('@g.us')) return s;
+  if (s.endsWith('@lid')) {
+    const cleanLid = s.split(':')[0];
+    return lidToPnMap.get(cleanLid) || cleanLid;
+  }
+  const userPart = s.split('@')[0].split(':')[0];
+  const digits = userPart.replace(/\D+/g, '');
   if (!digits) return '';
+  // Jika PHP menormalisasi @lid yang belum punya PN menjadi `<lid>@s.whatsapp.net`, kembalikan ke JID aslinya!
+  if (lidDigitsToJid.has(digits)) {
+    const lidJid = lidDigitsToJid.get(digits);
+    return lidToPnMap.get(lidJid) || lidJid;
+  }
+  if (s.endsWith('@s.whatsapp.net')) return `${digits}@s.whatsapp.net`;
+  if (s.endsWith('@c.us')) return `${digits}@s.whatsapp.net`;
   const e164 = digits.startsWith('0') ? '62' + digits.slice(1) : digits.startsWith('8') ? '62' + digits : digits;
   return `${e164}@s.whatsapp.net`;
+}
+
+function formatInteractiveText(header, body, items, footer) {
+  const numEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+  const lines = [];
+  if (header && String(header).trim() !== '') {
+    lines.push(`*${String(header).trim()}*`);
+    lines.push('━━━━━━━━━━━━━━━━━━');
+  }
+  if (body && String(body).trim() !== '') {
+    lines.push(String(body).trim());
+  }
+  if (Array.isArray(items) && items.length > 0) {
+    lines.push('');
+    let hasUrlOnly = true;
+    items.forEach((btn, idx) => {
+      const icon = numEmoji[idx] || `${idx + 1}.`;
+      if (btn.type === 'url' && btn.url) {
+        lines.push(`🔗 *${btn.title || 'Buka Tautan'}:*`);
+        lines.push(String(btn.url));
+      } else {
+        hasUrlOnly = false;
+        const desc = btn.description ? `\n    _${btn.description}_` : '';
+        lines.push(`${icon} *${btn.title}*${desc}`);
+      }
+    });
+    if (!hasUrlOnly) {
+      lines.push('');
+      lines.push('💡 _Balas dengan angka (1, 2, 3...) untuk memilih menu._');
+    }
+  }
+  if (footer && String(footer).trim() !== '') {
+    lines.push('');
+    lines.push(`_${String(footer).trim()}_`);
+  }
+  return lines.join('\n');
 }
 
 function sendJson(res, status, data) {
@@ -377,7 +588,6 @@ const server = http.createServer(async (req, res) => {
         initWhatsApp()
           .catch((e) => console.error('[WA Wake Error]:', e.message))
           .finally(() => { reconnecting = false; });
-        // Tunggu sebentar agar QR pertama sempat terbit
         for (let i = 0; i < 6 && !latestQrDataUrl && connectionStatus !== 'connected'; i++) {
           await new Promise((r) => setTimeout(r, 500));
         }
@@ -425,7 +635,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { success: true, status: 'logged_out' });
     }
 
-    // 3C. Graceful shutdown via HTTP agar PHP bisa menghentikan daemon dalam <5ms tanpa pkill hang
+    // 3C. Graceful shutdown via HTTP agar PHP bisa menghentikan daemon dalam <5ms
     if (method === 'POST' && /^\/api\/sessions\/[^/]+\/shutdown$/.test(pathname)) {
       sendJson(res, 200, { success: true, status: 'shutting_down' });
       setTimeout(() => gracefulShutdown('HTTP_SHUTDOWN'), 100);
@@ -446,32 +656,45 @@ const server = http.createServer(async (req, res) => {
       if (Array.isArray(body.mentions) && body.mentions.length > 0) {
         msgPayload.mentions = body.mentions.map(normalizeJid).filter(Boolean);
       }
-      const sent = await sock.sendMessage(jid, msgPayload);
+      const sent = await sendWaMessage(jid, msgPayload);
       return sendJson(res, 200, { id: sent?.key?.id || null, status: 'sent' });
     }
 
-    // 5. Kirim Buttons -> diarahkan ke 501 agar BridgeMdDriver otomatis fallback ke Poll interaktif yang 100% stabil di WA MD
+    // 5. Kirim Buttons -> format teks bernomor 100% instan di semua klien WA (ZERO "Menunggu pesan ini...")
     if (method === 'POST' && pathname === '/api/sendButtons') {
-      return sendJson(res, 501, { error: 'Gunakan fallback Poll/List interaktif untuk stabilitas WA Multi-Device.' });
+      const jid = normalizeJid(body.chatId);
+      const text = formatInteractiveText(body.header, body.body, body.buttons || [], body.footer);
+      const sent = await sendWaMessage(jid, { text });
+      return sendJson(res, 200, { id: sent?.key?.id || null, status: 'sent', mode: 'formatted_menu' });
     }
 
-    // 6. Kirim Interactive Poll (100% stabil & bisa diklik tanpa ketik di semua klien WA MD!)
+    // 6. Kirim List -> format daftar bernomor rapi 100% instan di semua klien WA
+    if (method === 'POST' && pathname === '/api/sendList') {
+      const jid = normalizeJid(body.chatId);
+      const flatItems = [];
+      for (const sec of Array.isArray(body.sections) ? body.sections : []) {
+        for (const row of Array.isArray(sec.rows) ? sec.rows : []) {
+          if (row && row.title) flatItems.push(row);
+        }
+      }
+      const text = formatInteractiveText(body.header, body.body, flatItems, body.footer);
+      const sent = await sendWaMessage(jid, { text });
+      return sendJson(res, 200, { id: sent?.key?.id || null, status: 'sent', mode: 'formatted_list' });
+    }
+
+    // 7. Kirim Interactive Poll (dilengkapi messageSecret + messageStore untuk dekripsi vote akurat)
     if (method === 'POST' && pathname === '/api/sendPoll') {
       const jid = normalizeJid(body.chatId);
       const poll = body.poll || {};
-      const sent = await sock.sendMessage(jid, {
+      const sent = await sendWaMessage(jid, {
         poll: {
           name: String(poll.name || 'Pilih Menu:'),
           values: Array.isArray(poll.options) ? poll.options.slice(0, 12).map(String) : ['Menu Utama'],
           selectableCount: poll.multipleAnswers ? 0 : 1,
+          messageSecret: crypto.randomBytes(32),
         },
       });
       return sendJson(res, 200, { id: sent?.key?.id || null, status: 'sent' });
-    }
-
-    // 7. Kirim List -> fallback otomatis ke Poll via 501
-    if (method === 'POST' && pathname === '/api/sendList') {
-      return sendJson(res, 501, { error: 'Gunakan fallback Poll interaktif.' });
     }
 
     // 8. Kirim Media (Image / Document / Video / Audio)
@@ -488,7 +711,7 @@ const server = http.createServer(async (req, res) => {
             : mType === 'audio'
               ? { audio: { url: mediaUrl }, mimetype: 'audio/mp4' }
               : { image: { url: mediaUrl }, caption };
-      const sent = await sock.sendMessage(jid, payload);
+      const sent = await sendWaMessage(jid, payload);
       return sendJson(res, 200, { id: sent?.key?.id || null, status: 'sent' });
     }
 
@@ -528,6 +751,13 @@ const server = http.createServer(async (req, res) => {
       const chatId = normalizeJid(body.chatId);
       await sock.updateBlockStatus(chatId, 'block');
       return sendJson(res, 200, { success: true, blocked: chatId });
+    }
+
+    // 13. Buka Blokir Kontak (sinkron dengan tombol Buka Blokir di Dashboard Anti-Call PHP)
+    if (method === 'POST' && pathname === '/api/contacts/unblock') {
+      const chatId = normalizeJid(body.chatId);
+      await sock.updateBlockStatus(chatId, 'unblock');
+      return sendJson(res, 200, { success: true, unblocked: chatId });
     }
 
     return sendJson(res, 404, { error: `Endpoint ${method} ${pathname} tidak ditemukan.` });
