@@ -34,6 +34,7 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
 } = require('@whiskeysockets/baileys');
 
 const PORT = parseInt(process.env.BRIDGE_PORT || '38421', 10);
@@ -97,11 +98,16 @@ async function initWhatsApp() {
   fs.mkdirSync(AUTH_DIR, { recursive: true });
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
+  const logger = pino({ level: 'warn' });
+
+  const authConfig = typeof makeCacheableSignalKeyStore === 'function'
+    ? { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) }
+    : state;
 
   sock = makeWASocket({
     version,
-    auth: state,
-    logger: pino({ level: 'warn' }),
+    auth: authConfig,
+    logger,
     browser: ['Ilmuna WA Bot', 'Chrome', '1.0.0'],
     markOnlineOnConnect: false,
     syncFullHistory: false,
@@ -202,8 +208,16 @@ async function initWhatsApp() {
       if (!m.message || m.key?.fromMe) continue;
       if (m.key?.remoteJid === 'status@broadcast') continue;
 
-      const remoteJid = m.key.remoteJid || '';
-      const isGroup = remoteJid.endsWith('@g.us');
+      const rawRemoteJid = m.key.remoteJid || '';
+      const isGroup = rawRemoteJid.endsWith('@g.us');
+      // Dukungan WhatsApp @lid terbaru: prioritaskan JID nomor HP asli (remoteJidAlt / participantAlt) bila tersedia
+      const remoteJid = !isGroup && rawRemoteJid.endsWith('@lid') && m.key.remoteJidAlt
+        ? m.key.remoteJidAlt
+        : rawRemoteJid;
+      const rawParticipant = m.key.participant || '';
+      const resolvedParticipant = rawParticipant.endsWith('@lid') && m.key.participantAlt
+        ? m.key.participantAlt
+        : rawParticipant;
       const msgId = m.key.id || '';
       if (isGroup && msgId) {
         rememberMessageKey(msgId, m.key);
@@ -258,8 +272,8 @@ async function initWhatsApp() {
       await forwardWebhook(eventName, {
         id: msgId,
         chatId: remoteJid,
-        from: isGroup ? (m.key.participant || '') : remoteJid,
-        participant: m.key.participant || '',
+        from: isGroup ? resolvedParticipant : remoteJid,
+        participant: resolvedParticipant,
         pushName: m.pushName || '',
         fromMe: false,
         type: msgType,
@@ -275,7 +289,7 @@ async function initWhatsApp() {
 function normalizeJid(input) {
   const s = String(input || '').trim();
   if (!s) return '';
-  if (s.endsWith('@g.us') || s.endsWith('@s.whatsapp.net')) return s;
+  if (s.endsWith('@g.us') || s.endsWith('@s.whatsapp.net') || s.endsWith('@lid')) return s;
   if (s.endsWith('@c.us')) return s.replace(/@c\.us$/, '@s.whatsapp.net');
   const digits = s.replace(/\D+/g, '');
   if (!digits) return '';
