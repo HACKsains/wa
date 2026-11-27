@@ -27,6 +27,24 @@ const http = require('http');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
+
+// Saring spam debug internal `libsignal` ("Closing session: SessionEntry { privKey... }")
+// agar bridge.log tetap bersih & tidak menampilkan buffer kunci ratchet Signal di log!
+const _origInfo = console.info.bind(console);
+console.info = (...args) => {
+  const first = typeof args[0] === 'string' ? args[0] : '';
+  if (
+    first.startsWith('Closing session:') ||
+    first.startsWith('Closing stale open session') ||
+    first.startsWith('Removing old closed session') ||
+    first.startsWith('Migrating session to:') ||
+    first.startsWith('Opening session:')
+  ) {
+    return;
+  }
+  _origInfo(...args);
+};
+
 const pino = require('pino');
 const QRCode = require('qrcode');
 const {
