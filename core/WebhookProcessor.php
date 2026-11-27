@@ -53,7 +53,8 @@ class WebhookProcessor
         $token     = (string)($query['hub_verify_token'] ?? $query['hub.verify_token'] ?? '');
         $challenge = (string)($query['hub_challenge'] ?? $query['hub.challenge'] ?? '');
 
-        $expectedToken = $this->transport->getCloudDriver()?->getVerifyToken() ?: WA_CLOUD_VERIFY_TOKEN;
+        $cloudDriver = $this->transport->getCloudDriver();
+        $expectedToken = ($cloudDriver !== null ? $cloudDriver->getVerifyToken() : '') ?: WA_CLOUD_VERIFY_TOKEN;
 
         if ($mode === 'subscribe' && $challenge !== '' && $expectedToken !== '' && hash_equals($expectedToken, $token)) {
             return [
@@ -172,7 +173,7 @@ class WebhookProcessor
     {
         if ($provider === 'cloud_api') {
             $cloud = $this->transport->getCloudDriver();
-            $secret = $cloud?->getAppSecret() ?: WA_CLOUD_APP_SECRET;
+            $secret = ($cloud !== null ? $cloud->getAppSecret() : '') ?: WA_CLOUD_APP_SECRET;
             $sig = $headers['x-hub-signature-256'] ?? '';
             if ($secret === '') {
                 return false;
@@ -183,7 +184,7 @@ class WebhookProcessor
         }
 
         $bridge = $this->transport->getBridgeDriver();
-        $secret = $bridge?->getWebhookSecret() ?: WA_BRIDGE_WEBHOOK_SECRET;
+        $secret = ($bridge !== null ? $bridge->getWebhookSecret() : '') ?: WA_BRIDGE_WEBHOOK_SECRET;
         $sig = $headers['x-webhook-signature']
             ?? $headers['x-bridge-signature']
             ?? $headers['x-ilmuna-signature']
@@ -220,17 +221,22 @@ class WebhookProcessor
         $type    = (string)($event['event_type'] ?? 'unknown');
         $eventId = (string)($event['event_id'] ?? '');
 
-        return match ($type) {
-            'incoming_call'   => $this->routeIncomingCall($event),
-            'group_message'   => $this->routeGroupMessage($event),
-            'private_message' => $this->routePrivateMessage($event),
-            'device_status'   => $this->routeDeviceStatus($event),
-            default           => [
-                'event_id'   => $eventId,
-                'event_type' => $type,
-                'status'     => 'ignored_unknown_type',
-            ],
-        };
+        switch ($type) {
+            case 'incoming_call':
+                return $this->routeIncomingCall($event);
+            case 'group_message':
+                return $this->routeGroupMessage($event);
+            case 'private_message':
+                return $this->routePrivateMessage($event);
+            case 'device_status':
+                return $this->routeDeviceStatus($event);
+            default:
+                return [
+                    'event_id'   => $eventId,
+                    'event_type' => $type,
+                    'status'     => 'ignored_unknown_type',
+                ];
+        }
     }
 
     private function routeIncomingCall(array $event): array

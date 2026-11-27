@@ -7,6 +7,10 @@ declare(strict_types=1);
  * ==============================================================================
  */
 
+if (!defined('ILMUNA_SKIP_GD_WAF_INTERSTITIAL')) {
+    define('ILMUNA_SKIP_GD_WAF_INTERSTITIAL', true);
+}
+
 require_once __DIR__ . '/config.php';
 
 $_SESSION = [];

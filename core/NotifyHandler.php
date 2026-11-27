@@ -36,19 +36,31 @@ class NotifyHandler
             return ['success' => false, 'http_status' => 400, 'message' => 'Field "event" wajib diisi.', 'data' => []];
         }
 
-        $result = match ($event) {
-            'absensi_alert'      => $this->handleAbsensiAlert($data, $sendImmediately),
-            'pelanggaran_bk'     => $this->handlePelanggaranBk($data, $sendImmediately),
-            'perizinan_baru'     => $this->handlePerizinanBaru($data, $sendImmediately),
-            'perizinan_status'   => $this->handlePerizinanStatus($data, $sendImmediately),
-            'academic_broadcast' => $this->handleAcademicBroadcast($data),
-            default              => [
-                'success'     => false,
-                'http_status' => 400,
-                'message'     => "Event '{$event}' tidak dikenali.",
-                'data'        => [],
-            ],
-        };
+        switch ($event) {
+            case 'absensi_alert':
+                $result = $this->handleAbsensiAlert($data, $sendImmediately);
+                break;
+            case 'pelanggaran_bk':
+                $result = $this->handlePelanggaranBk($data, $sendImmediately);
+                break;
+            case 'perizinan_baru':
+                $result = $this->handlePerizinanBaru($data, $sendImmediately);
+                break;
+            case 'perizinan_status':
+                $result = $this->handlePerizinanStatus($data, $sendImmediately);
+                break;
+            case 'academic_broadcast':
+                $result = $this->handleAcademicBroadcast($data);
+                break;
+            default:
+                $result = [
+                    'success'     => false,
+                    'http_status' => 400,
+                    'message'     => "Event '{$event}' tidak dikenali.",
+                    'data'        => [],
+                ];
+                break;
+        }
 
         wa_log_sync(
             $this->pdo,

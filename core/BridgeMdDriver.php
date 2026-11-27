@@ -97,12 +97,20 @@ class BridgeMdDriver implements TransportInterface
             ];
         }
 
-        $path = match ($this->flavor) {
-            'gowa'  => '/app/login',
-            'waha'  => '/api/' . rawurlencode($this->session) . '/auth/qr?format=image',
-            'whapi' => '/users/login',
-            default => '/api/sessions/' . rawurlencode($this->session) . '/qr',
-        };
+        switch ($this->flavor) {
+            case 'gowa':
+                $path = '/app/login';
+                break;
+            case 'waha':
+                $path = '/api/' . rawurlencode($this->session) . '/auth/qr?format=image';
+                break;
+            case 'whapi':
+                $path = '/users/login';
+                break;
+            default:
+                $path = '/api/sessions/' . rawurlencode($this->session) . '/qr';
+                break;
+        }
 
         $resp = $this->httpRequest('GET', $this->baseUrl . $path, null);
         $data = is_array($resp['data']) ? $resp['data'] : [];
@@ -484,22 +492,33 @@ class BridgeMdDriver implements TransportInterface
             ];
         }
 
-        $path = match ($this->flavor) {
-            'gowa'   => '/app/devices',
-            'fonnte' => '/device',
-            'whapi'  => '/health',
-            default  => '/api/sessions/' . rawurlencode($this->session) . '/status',
-        };
+        switch ($this->flavor) {
+            case 'gowa':
+                $path = '/app/devices';
+                break;
+            case 'fonnte':
+                $path = '/device';
+                break;
+            case 'whapi':
+                $path = '/health';
+                break;
+            default:
+                $path = '/api/sessions/' . rawurlencode($this->session) . '/status';
+                break;
+        }
         $method = $this->flavor === 'fonnte' ? 'POST' : 'GET';
         $resp = $this->httpRequest($method, $this->baseUrl . $path, null);
         $rawStatus = strtolower((string)($resp['data']['status'] ?? $resp['data']['device_status'] ?? ''));
 
-        $mappedStatus = match (true) {
-            $resp['ok'] && in_array($rawStatus, ['connected', 'working', 'open', 'ready', 'connect', 'ok'], true) => 'connected',
-            $resp['ok'] && $this->flavor === 'gowa' && !empty($resp['data']['results'])                           => 'connected',
-            $resp['ok'] && in_array($rawStatus, ['qr', 'scan_qr_code', 'qr_pending'], true)                       => 'qr_pending',
-            default                                                                                                => 'disconnected',
-        };
+        if ($resp['ok'] && in_array($rawStatus, ['connected', 'working', 'open', 'ready', 'connect', 'ok'], true)) {
+            $mappedStatus = 'connected';
+        } elseif ($resp['ok'] && $this->flavor === 'gowa' && !empty($resp['data']['results'])) {
+            $mappedStatus = 'connected';
+        } elseif ($resp['ok'] && in_array($rawStatus, ['qr', 'scan_qr_code', 'qr_pending'], true)) {
+            $mappedStatus = 'qr_pending';
+        } else {
+            $mappedStatus = 'disconnected';
+        }
 
         return [
             'success'     => $resp['ok'],
@@ -575,11 +594,13 @@ class BridgeMdDriver implements TransportInterface
         // 2. Event Status Koneksi Session / Device
         if (in_array($eventName, ['session.status', 'connection.update', 'device.status'], true)) {
             $rawStatus = strtolower((string)($data['status'] ?? $data['state'] ?? 'disconnected'));
-            $mapped = match (true) {
-                in_array($rawStatus, ['connected', 'working', 'open', 'ready'], true) => 'connected',
-                in_array($rawStatus, ['qr', 'qr_pending', 'scan_qr_code'], true)      => 'qr_pending',
-                default                                                               => 'disconnected',
-            };
+            if (in_array($rawStatus, ['connected', 'working', 'open', 'ready'], true)) {
+                $mapped = 'connected';
+            } elseif (in_array($rawStatus, ['qr', 'qr_pending', 'scan_qr_code'], true)) {
+                $mapped = 'qr_pending';
+            } else {
+                $mapped = 'disconnected';
+            }
 
             return [[
                 'provider'     => 'md_bridge',

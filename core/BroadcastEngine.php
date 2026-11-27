@@ -302,13 +302,23 @@ class BroadcastEngine
         // Gabungkan seluruh audiens lintas role tanpa duplikasi JID
         $combined = [];
         foreach ($targetRoles as $role) {
-            $scope = match ($role) {
-                'siswa'       => $kelasIds !== [] ? 'siswa_kelas' : 'all_siswa',
-                'orang_tua'   => $kelasIds !== [] ? 'ortu_kelas' : 'all_ortu',
-                'guru'        => 'all_guru',
-                'group_kelas' => 'groups',
-                default       => null,
-            };
+            switch ($role) {
+                case 'siswa':
+                    $scope = $kelasIds !== [] ? 'siswa_kelas' : 'all_siswa';
+                    break;
+                case 'orang_tua':
+                    $scope = $kelasIds !== [] ? 'ortu_kelas' : 'all_ortu';
+                    break;
+                case 'guru':
+                    $scope = 'all_guru';
+                    break;
+                case 'group_kelas':
+                    $scope = 'groups';
+                    break;
+                default:
+                    $scope = null;
+                    break;
+            }
             if ($scope === null) {
                 continue;
             }
@@ -318,7 +328,7 @@ class BroadcastEngine
             }
         }
 
-        $badge = match ($module) {
+        $badgeMap = [
             'tugas'       => '📚 TUGAS BARU',
             'proyek'      => '🚀 PROYEK P5 / PPRA',
             'agenda'      => '🗓️ AGENDA & KALDIK SEKOLAH',
@@ -327,8 +337,8 @@ class BroadcastEngine
             'materi'      => '📖 MATERI PEMBELAJARAN BARU',
             'mutabaah'    => "🕌 PENGINGAT MUTABA'AH YAUMIYAH",
             'public_form' => '📋 FORMULIR RESMI SEKOLAH',
-            default       => '📢 INFORMASI AKADEMIK',
-        };
+        ];
+        $badge = $badgeMap[$module] ?? '📢 INFORMASI AKADEMIK';
         if ($isReminder) {
             $badge = '⏰ PENGINGAT TENGGAT — ' . strtoupper($module);
         }

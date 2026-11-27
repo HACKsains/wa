@@ -210,8 +210,8 @@ class TransportFactory implements TransportInterface
     {
         return [
             'mode'      => $this->mode,
-            'cloud_api' => $this->cloudDriver?->healthCheck(),
-            'md_bridge' => $this->bridgeDriver?->healthCheck(),
+            'cloud_api' => $this->cloudDriver !== null ? $this->cloudDriver->healthCheck() : null,
+            'md_bridge' => $this->bridgeDriver !== null ? $this->bridgeDriver->healthCheck() : null,
         ];
     }
 

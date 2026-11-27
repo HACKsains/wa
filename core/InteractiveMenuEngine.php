@@ -87,13 +87,24 @@ class InteractiveMenuEngine
 
         // 4. Routing aksi spesifik per Role
         if ($actionId !== null) {
-            $handled = match ($role) {
-                'orang_tua'       => $this->handleOrangTuaAction($phone, $actionId, $contact, $session),
-                'siswa'           => $this->handleSiswaAction($phone, $actionId, $contact, $session),
-                'guru', 'guru_bk' => $this->handleGuruAction($phone, $actionId, $contact, $session),
-                'admin'           => $this->handleAdminAction($phone, $actionId, $contact, $session),
-                default           => $this->handleGuestAction($phone, $actionId, $contact, $session),
-            };
+            switch ($role) {
+                case 'orang_tua':
+                    $handled = $this->handleOrangTuaAction($phone, $actionId, $contact, $session);
+                    break;
+                case 'siswa':
+                    $handled = $this->handleSiswaAction($phone, $actionId, $contact, $session);
+                    break;
+                case 'guru':
+                case 'guru_bk':
+                    $handled = $this->handleGuruAction($phone, $actionId, $contact, $session);
+                    break;
+                case 'admin':
+                    $handled = $this->handleAdminAction($phone, $actionId, $contact, $session);
+                    break;
+                default:
+                    $handled = $this->handleGuestAction($phone, $actionId, $contact, $session);
+                    break;
+            }
             if ($handled !== null) {
                 return $handled;
             }
@@ -225,13 +236,13 @@ class InteractiveMenuEngine
             return $this->sendOrangTuaMainButtons($phone, $contact, $selectedChild, $children, $session);
         }
 
-        $menuCode = match ($role) {
+        $menuMap = [
             'siswa'   => 'MENU_SISWA_MAIN',
             'guru'    => 'MENU_GURU_MAIN',
             'guru_bk' => 'MENU_GURU_BK_MAIN',
             'admin'   => 'MENU_ADMIN_MAIN',
-            default   => 'MENU_GUEST_MAIN',
-        };
+        ];
+        $menuCode = $menuMap[$role] ?? 'MENU_GUEST_MAIN';
 
         $tpl = $this->getMenuTemplate($menuCode);
         $vars = [

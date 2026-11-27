@@ -657,11 +657,17 @@ class GroupGuardEngine
 
         $notified = 0;
         $studentName = (string)$studentContact['display_name'];
-        $actionLabel = match ($actionTaken) {
-            'deleted_and_kicked' => 'Pesan dihapus & dikeluarkan dari grup',
-            'deleted_and_warned' => 'Pesan dihapus & diberi peringatan',
-            default              => 'Diberi peringatan tertulis',
-        };
+        switch ($actionTaken) {
+            case 'deleted_and_kicked':
+                $actionLabel = 'Pesan dihapus & dikeluarkan dari grup';
+                break;
+            case 'deleted_and_warned':
+                $actionLabel = 'Pesan dihapus & diberi peringatan';
+                break;
+            default:
+                $actionLabel = 'Diberi peringatan tertulis';
+                break;
+        }
 
         $body = "Assalamu'alaikum Bapak/Ibu Wali Murid.\n\n"
             . "Sistem *Ilmuna Group Guard* mendeteksi pelanggaran etika komunikasi oleh ananda *{$studentName}* di grup *{$groupName}*:\n"

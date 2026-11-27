@@ -5,7 +5,7 @@ declare(strict_types=1);
  * ==============================================================================
  * ILMUNA WA BOT — SINGLETON PDO & AUTO-MIGRATION ENGINE
  * ==============================================================================
- * Database : uofruaju_wa_ilmuna (MySQL 8.0+ / MariaDB 10.4+, InnoDB, utf8mb4)
+ * Database : uofruaju_wa (MySQL 8.0+ / MariaDB 10.4+, InnoDB, utf8mb4)
  * Skema    : 14 tabel resmi dari DATABASE_SCHEMA.sql + seed menu & kamus awal
  * ==============================================================================
  */
@@ -63,7 +63,17 @@ final class WaDatabase
                 );
                 self::$instance = new PDO($dsn, DB_USER, DB_PASS, $options);
             } catch (PDOException $e2) {
-                // Fallback lokal Laragon/XAMPP default root
+                // Fallback lokal Laragon/XAMPP default root (hanya di localhost/CLI)
+                $httpHost = strtolower((string)($_SERVER['HTTP_HOST'] ?? ''));
+                $isLocalEnv = (PHP_SAPI === 'cli')
+                    || in_array($httpHost, ['localhost', '127.0.0.1', 'wa-bot.test'], true)
+                    || strpos($httpHost, 'localhost:') === 0
+                    || strpos($httpHost, '127.0.0.1:') === 0;
+
+                if (!$isLocalEnv) {
+                    throw $e;
+                }
+
                 $localDsnNoDb = 'mysql:host=127.0.0.1;port=3306;charset=utf8mb4';
                 $bootstrap = new PDO($localDsnNoDb, 'root', '', [
                     PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,

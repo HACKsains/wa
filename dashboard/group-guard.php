@@ -113,11 +113,13 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === '1') {
             'violations' => (int)$pdo->query('SELECT COUNT(*) FROM wa_violation_logs')->fetchColumn(),
         ];
 
-        $rows = match ($tab) {
-            'groups'     => $pdo->query('SELECT * FROM wa_groups ORDER BY id DESC')->fetchAll(PDO::FETCH_ASSOC),
-            'violations' => $pdo->query('SELECT * FROM wa_violation_logs ORDER BY id DESC LIMIT 100')->fetchAll(PDO::FETCH_ASSOC),
-            default      => $pdo->query('SELECT * FROM wa_group_rules ORDER BY rule_type ASC, id DESC')->fetchAll(PDO::FETCH_ASSOC),
-        };
+        if ($tab === 'groups') {
+            $rows = $pdo->query('SELECT * FROM wa_groups ORDER BY id DESC')->fetchAll(PDO::FETCH_ASSOC);
+        } elseif ($tab === 'violations') {
+            $rows = $pdo->query('SELECT * FROM wa_violation_logs ORDER BY id DESC LIMIT 100')->fetchAll(PDO::FETCH_ASSOC);
+        } else {
+            $rows = $pdo->query('SELECT * FROM wa_group_rules ORDER BY rule_type ASC, id DESC')->fetchAll(PDO::FETCH_ASSOC);
+        }
 
         wa_json_response(true, 'Data Group Guard dimuat.', ['tab' => $tab, 'counts' => $counts, 'rows' => $rows]);
     } catch (Throwable $e) {

@@ -13,8 +13,8 @@ declare(strict_types=1);
 // 1. Kredensial MySQL cPanel Hosting
 define('DB_HOST', 'localhost');
 define('DB_PORT', '3306');
-define('DB_NAME', 'uofruaju_wa_ilmuna');
-define('DB_USER', 'uofruaju_wa_ilmuna');
+define('DB_NAME', 'uofruaju_wa');
+define('DB_USER', 'uofruaju_wa');
 define('DB_PASS', 'ISI_PASSWORD_DB_CPANEL');
 
 // 2. Mode Transport WA ('cloud_api' | 'md_bridge' | 'hybrid')

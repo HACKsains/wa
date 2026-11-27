@@ -76,7 +76,8 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === '1') {
 
             if (in_array($act, ['pause', 'resume', 'cancel'], true)) {
                 $id = (int)($body['id'] ?? 0);
-                $st = match ($act) { 'pause' => 'paused', 'resume' => 'scheduled', 'cancel' => 'cancelled' };
+                $stMap = ['pause' => 'paused', 'resume' => 'scheduled', 'cancel' => 'cancelled'];
+                $st = $stMap[$act];
                 $pdo->prepare('UPDATE wa_broadcast_campaigns SET status = :st WHERE id = :id')->execute([':st' => $st, ':id' => $id]);
                 wa_json_response(true, "Status kampanye #{$id} diubah menjadi {$st}.", ['id' => $id, 'status' => $st]);
             }

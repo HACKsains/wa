@@ -101,11 +101,12 @@ try {
             if ($cid <= 0) {
                 wa_json_response(false, 'campaign_id tidak valid.', [], 422);
             }
-            $newStatus = match ($action) {
+            $statusMap = [
                 'pause'  => 'paused',
                 'resume' => 'scheduled',
                 'cancel' => 'cancelled',
-            };
+            ];
+            $newStatus = $statusMap[$action];
             $stmt = $pdo->prepare('UPDATE wa_broadcast_campaigns SET status = :st WHERE id = :id');
             $stmt->execute([':st' => $newStatus, ':id' => $cid]);
             wa_json_response(true, "Status kampanye #{$cid} diubah menjadi {$newStatus}.", ['campaign_id' => $cid, 'status' => $newStatus]);

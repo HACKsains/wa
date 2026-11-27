@@ -1,10 +1,12 @@
 # ==============================================================================
-# ILMUNA WA BOT — APACHE SECURITY & CLEAN URL CONFIGURATION
+# ILMUNA WA BOT — PRODUCTION .HTACCESS (wa.ilmuna.my.id)
+# Lingkungan Server: LiteSpeed / Apache / cPanel (User: uofruaju | PHP ea-php74 s/d 8.3)
 # ==============================================================================
 
-Options -Indexes -MultiViews
-ServerSignature Off
-
+# ------------------------------------------------------------------------------
+# 1. SECURITY HEADERS & GUARDIAN DOME WAF (Browser Pages)
+#    Endpoint API (/api/v1/*) diisolasi di api/v1/.htaccess
+# ------------------------------------------------------------------------------
 <IfModule mod_headers.c>
     Header always set X-Content-Type-Options "nosniff"
     Header always set X-Frame-Options "SAMEORIGIN"
@@ -12,20 +14,51 @@ ServerSignature Off
     Header always set X-XSS-Protection "1; mode=block"
 </IfModule>
 
+<IfModule lsapi_module>
+    php_value auto_prepend_file "/home/uofruaju/guardian-dome/guardian-dome-waf.php"
+    php_value error_log "/home/uofruaju/logs/php.error.log"
+    php_flag log_errors On
+    php_flag display_errors Off
+    php_value memory_limit 256M
+</IfModule>
+
+<IfModule php7_module>
+    php_value auto_prepend_file "/home/uofruaju/guardian-dome/guardian-dome-waf.php"
+    php_value error_log "/home/uofruaju/logs/php.error.log"
+    php_flag log_errors On
+    php_flag display_errors Off
+    php_value memory_limit 256M
+</IfModule>
+
+# Lewati scan pre-flight Guardian Dome pada webhook WA & handshake SSO callback/SLO/logout
+<FilesMatch "^(webhook|sso-callback|sso-slo|logout)\.php$">
+    <IfModule lsapi_module>
+        php_value auto_prepend_file none
+    </IfModule>
+    <IfModule php7_module>
+        php_value auto_prepend_file none
+    </IfModule>
+</FilesMatch>
+
+# ------------------------------------------------------------------------------
+# 2. PROTEKSI FILE SENSITIF & DIRECTORY BROWSING
+# ------------------------------------------------------------------------------
+Options -Indexes
+
 <IfModule mod_rewrite.c>
     RewriteEngine On
 
-    # Pertahankan header Authorization & X-Ilmuna-* untuk FastCGI/PHP-FPM
+    # Pertahankan header Authorization & X-Ilmuna-* untuk LiteSpeed/FastCGI/PHP-FPM
     RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
 
-    # 1. Blokir akses langsung ke folder sensitif (core, workers, bridge, sdk, tests, logs)
+    # Blokir akses langsung ke folder sensitif (core, workers, bridge, sdk, tests, logs)
     RewriteRule ^(core|workers|bridge|sdk|tests|logs|scratch)(/|$) - [F,L,NC]
 
-    # 2. Blokir akses langsung ke berkas konfigurasi, skema SQL, dokumentasi, & dotfile
+    # Blokir akses langsung ke berkas konfigurasi, skema SQL, dokumentasi, & dotfile
     RewriteRule ^(config(\.local)?\.php|database\.php|auth\.php)$ - [F,L,NC]
     RewriteRule \.(sql|md|env|ini|log|bak|sh|ps1|git|lock)$ - [F,L,NC]
 
-    # 3. Clean URLs untuk endpoint utama, SSO & halaman dashboard
+    # Clean URLs untuk endpoint utama, SSO & halaman dashboard
     RewriteCond %{REQUEST_FILENAME} !-f
     RewriteCond %{REQUEST_FILENAME} !-d
     RewriteRule ^webhook/?$ webhook.php [L,QSA]
@@ -66,7 +99,17 @@ ServerSignature Off
     </IfModule>
 </FilesMatch>
 
-<FilesMatch "^(config(\.local)?|database)\.php$">
+<FilesMatch "^(config(\.local)?|database|auth)\.php$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+<FilesMatch ^(?i:\.ht.*)$>
     <IfModule mod_authz_core.c>
         Require all denied
     </IfModule>

@@ -1,6 +1,32 @@
 <?php
 declare(strict_types=1);
 
+// 0. Timezone wajib Waktu Indonesia Barat (WIB) & Polyfill PHP 7.4 (ea-php74 cPanel)
+date_default_timezone_set('Asia/Jakarta');
+
+if (!function_exists('str_starts_with')) {
+    function str_starts_with(string $haystack, string $needle): bool
+    {
+        return $needle === '' || strncmp($haystack, $needle, strlen($needle)) === 0;
+    }
+}
+if (!function_exists('str_ends_with')) {
+    function str_ends_with(string $haystack, string $needle): bool
+    {
+        if ($needle === '') {
+            return true;
+        }
+        $len = strlen($needle);
+        return strlen($haystack) >= $len && substr_compare($haystack, $needle, -$len) === 0;
+    }
+}
+if (!function_exists('str_contains')) {
+    function str_contains(string $haystack, string $needle): bool
+    {
+        return $needle === '' || strpos($haystack, $needle) !== false;
+    }
+}
+
 // ==============================================================================
 // GUARDIAN DOME (Patch-3.0) — LAYER PERLINDUNGAN TERDEPAN EKOSISTEM ILMUNA
 // Target: wa.ilmuna.my.id (Admin Panel & Public Routes)
@@ -56,25 +82,24 @@ if (PHP_SAPI !== 'cli') {
  * ==============================================================================
  * ILMUNA WA BOT — CENTRALIZED CONFIGURATION (SINGLE SOURCE OF TRUTH)
  * ==============================================================================
- * Platform    : WhatsApp Bot PHP 8.2+ Native (Interactive Buttons, Anti-Call,
+ * Platform    : WhatsApp Bot PHP 7.4+ / 8.x Native (Interactive Buttons, Anti-Call,
  *               Group Guard, Auto-Broadcast Akademik & Bridge Ilmuna Learn)
  * Domain      : wa.ilmuna.my.id
  * UI Standard : Lumina Gold & Sentuhan Nusantara (learn/README.md)
  * ==============================================================================
  */
 
-// 1. Timezone wajib Waktu Indonesia Barat (WIB)
-date_default_timezone_set('Asia/Jakarta');
+// 1. Deteksi HTTPS (termasuk di balik LiteSpeed / Reverse Proxy / Cloudflare)
+$waIsHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+    || (isset($_SERVER['SERVER_PORT']) && (int)$_SERVER['SERVER_PORT'] === 443)
+    || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower((string)$_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https');
 
 // 2. Session aman untuk mode non-CLI (Admin Panel & CSRF)
 if (session_status() === PHP_SESSION_NONE && !headers_sent() && PHP_SAPI !== 'cli') {
-    $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
-        || (isset($_SERVER['SERVER_PORT']) && (int)$_SERVER['SERVER_PORT'] === 443);
-
     session_set_cookie_params([
         'lifetime' => 0,
         'path'     => '/',
-        'secure'   => $isHttps,
+        'secure'   => $waIsHttps,
         'httponly' => true,
         'samesite' => 'Lax',
     ]);
@@ -97,9 +122,7 @@ if (!defined('BASE_URL')) {
     if (PHP_SAPI === 'cli') {
         define('BASE_URL', 'http://localhost/wa%20bot');
     } else {
-        $protocol = ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
-            || (isset($_SERVER['SERVER_PORT']) && (int)$_SERVER['SERVER_PORT'] === 443))
-            ? 'https://' : 'http://';
+        $protocol = $waIsHttps ? 'https://' : 'http://';
         $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
         $scriptDir = str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? ''));
         $basePath = (string)preg_replace(
@@ -115,12 +138,12 @@ if (!defined('BASE_URL')) {
     }
 }
 
-// 5. Konfigurasi Database MySQL InnoDB (uofruaju_wa_ilmuna)
+// 5. Konfigurasi Database MySQL InnoDB (Produksi cPanel: uofruaju_wa)
 if (!defined('DB_HOST'))    define('DB_HOST', (string)(getenv('WA_DB_HOST') ?: 'localhost'));
 if (!defined('DB_PORT'))    define('DB_PORT', (string)(getenv('WA_DB_PORT') ?: '3306'));
-if (!defined('DB_NAME'))    define('DB_NAME', (string)(getenv('WA_DB_NAME') ?: 'uofruaju_wa_ilmuna'));
-if (!defined('DB_USER'))    define('DB_USER', (string)(getenv('WA_DB_USER') ?: 'root'));
-if (!defined('DB_PASS'))    define('DB_PASS', (string)(getenv('WA_DB_PASS') !== false ? getenv('WA_DB_PASS') : ''));
+if (!defined('DB_NAME'))    define('DB_NAME', (string)(getenv('WA_DB_NAME') ?: 'uofruaju_wa'));
+if (!defined('DB_USER'))    define('DB_USER', (string)(getenv('WA_DB_USER') ?: 'uofruaju_wa'));
+if (!defined('DB_PASS'))    define('DB_PASS', (string)(getenv('WA_DB_PASS') !== false ? getenv('WA_DB_PASS') : 'Ilmuna28@'));
 if (!defined('DB_CHARSET')) define('DB_CHARSET', 'utf8mb4');
 
 // 6. Konfigurasi Dual Transport Adapter (hybrid | cloud_api | md_bridge)
@@ -143,7 +166,19 @@ if (!defined('WA_BRIDGE_WEBHOOK_SECRET')) define('WA_BRIDGE_WEBHOOK_SECRET', (st
 if (!defined('WA_BRIDGE_FLAVOR'))         define('WA_BRIDGE_FLAVOR', (string)(getenv('WA_BRIDGE_FLAVOR') ?: 'generic'));
 
 // 7. Konfigurasi Integrasi Dua Arah HMAC-SHA256 dengan Ilmuna Learn
-if (!defined('LEARN_API_BASE_URL'))       define('LEARN_API_BASE_URL', (string)(getenv('LEARN_API_BASE_URL') ?: 'http://localhost/learn'));
+if (!defined('LEARN_API_BASE_URL')) {
+    $envLearnApi = getenv('LEARN_API_BASE_URL');
+    if ($envLearnApi !== false && $envLearnApi !== '') {
+        define('LEARN_API_BASE_URL', (string)$envLearnApi);
+    } else {
+        $reqHost = strtolower((string)($_SERVER['HTTP_HOST'] ?? ''));
+        $isLocalReq = (PHP_SAPI === 'cli')
+            || in_array($reqHost, ['localhost', '127.0.0.1', 'wa-bot.test'], true)
+            || strpos($reqHost, 'localhost:') === 0
+            || strpos($reqHost, '127.0.0.1:') === 0;
+        define('LEARN_API_BASE_URL', $isLocalReq ? 'http://localhost/learn' : 'https://learn.ilmuna.my.id');
+    }
+}
 if (!defined('LEARN_PUBLIC_URL'))         define('LEARN_PUBLIC_URL', (string)(getenv('LEARN_PUBLIC_URL') ?: 'https://learn.ilmuna.my.id'));
 if (!defined('WA_BRIDGE_PUBLIC_KEY'))     define('WA_BRIDGE_PUBLIC_KEY', (string)(getenv('WA_BRIDGE_PUBLIC_KEY') ?: 'pk_wa_ilmuna_2026_bridge'));
 if (!defined('LEARN_HMAC_SECRET'))        define('LEARN_HMAC_SECRET', (string)(getenv('LEARN_HMAC_SECRET') ?: 'sk_wa_ilmuna_2026_hmac_shared_secret'));
@@ -445,8 +480,10 @@ function wa_verify_csrf(?string $token): bool
 
 /**
  * Standar Respon JSON Seragam (Hukum 6 learn/README.md)
+ *
+ * @param mixed $data
  */
-function wa_json_response(bool $success, string $message, mixed $data = null, int $statusCode = 200): never
+function wa_json_response(bool $success, string $message, $data = null, int $statusCode = 200): void
 {
     if (!headers_sent()) {
         http_response_code($statusCode);
@@ -466,8 +503,11 @@ function wa_json_response(bool $success, string $message, mixed $data = null, in
 
 /**
  * Baca pengaturan global dari tabel wa_settings dengan in-memory cache
+ *
+ * @param mixed $default
+ * @return mixed
  */
-function wa_get_setting(string $key, mixed $default = null, ?PDO $pdo = null): mixed
+function wa_get_setting(string $key, $default = null, ?PDO $pdo = null)
 {
     static $cache = null;
 
