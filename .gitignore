@@ -1,0 +1,24 @@
+# Local Environment & Secrets Override
+config.local.php
+.env
+.env.*
+
+# Bridge Runtime, Sessions & Dependencies
+bridge/node_modules/
+bridge/auth_info/
+bridge/runtime/
+bridge/bin/
+
+# Logs, Locks & Temporary Files
+error_log
+*.log
+*.lock
+*.tmp
+*.bak
+
+# Vendor & OS Junk
+/vendor/
+composer.phar
+.DS_Store
+Thumbs.db
+desktop.ini

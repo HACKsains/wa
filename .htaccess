@@ -1,0 +1,77 @@
+# ==============================================================================
+# ILMUNA WA BOT — APACHE SECURITY & CLEAN URL CONFIGURATION
+# ==============================================================================
+
+Options -Indexes -MultiViews
+ServerSignature Off
+
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set X-XSS-Protection "1; mode=block"
+</IfModule>
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Pertahankan header Authorization & X-Ilmuna-* untuk FastCGI/PHP-FPM
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+    # 1. Blokir akses langsung ke folder sensitif (core, workers, bridge, sdk, tests, logs)
+    RewriteRule ^(core|workers|bridge|sdk|tests|logs|scratch)(/|$) - [F,L,NC]
+
+    # 2. Blokir akses langsung ke berkas konfigurasi, skema SQL, dokumentasi, & dotfile
+    RewriteRule ^(config(\.local)?\.php|database\.php|auth\.php)$ - [F,L,NC]
+    RewriteRule \.(sql|md|env|ini|log|bak|sh|ps1|git|lock)$ - [F,L,NC]
+
+    # 3. Clean URLs untuk endpoint utama, SSO & halaman dashboard
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^webhook/?$ webhook.php [L,QSA]
+
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^login/?$ login.php [L,QSA]
+
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^logout/?$ logout.php [L,QSA]
+
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^sso-callback/?$ sso-callback.php [L,QSA]
+
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^sso-slo/?$ sso-slo.php [L,QSA]
+
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^api/v1/([a-zA-Z0-9_-]+)/?$ api/v1/$1.php [L,QSA]
+
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^dashboard/([a-zA-Z0-9_-]+)/?$ dashboard/$1.php [L,QSA]
+</IfModule>
+
+# Lapisan proteksi tambahan jika mod_rewrite nonaktif
+<FilesMatch "\.(sql|md|env|ini|log|bak|lock)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+<FilesMatch "^(config(\.local)?|database)\.php$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>

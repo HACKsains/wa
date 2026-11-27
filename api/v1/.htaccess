@@ -1,0 +1,9 @@
+# Bebaskan endpoint API server-to-server WA Bot dari auto_prepend HTML interstitial WAF
+<FilesMatch "^(notify|broadcast|status|bridge)\.php$">
+    <IfModule lsapi_module>
+        php_value auto_prepend_file none
+    </IfModule>
+    <IfModule php7_module>
+        php_value auto_prepend_file none
+    </IfModule>
+</FilesMatch>

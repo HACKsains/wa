@@ -1,0 +1,7 @@
+---
+deployment:
+  tasks:
+    - export DEPLOYPATH=/home/uofruaju/wa.ilmuna.my.id/
+    - mkdir -p $DEPLOYPATH
+    - if [ "$(realpath .)" != "$(realpath $DEPLOYPATH)" ]; then /bin/cp -rf * $DEPLOYPATH; /bin/cp -f .htaccess $DEPLOYPATH 2>/dev/null || true; /bin/cp -f api/v1/.htaccess $DEPLOYPATH/api/v1/.htaccess 2>/dev/null || true; fi
+    - echo "Deployment complete - Ilmuna WA Bot deployed to $DEPLOYPATH"

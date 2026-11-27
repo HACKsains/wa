@@ -1,0 +1,14 @@
+{
+  "name": "ilmuna-wa-bridge",
+  "version": "1.0.0",
+  "description": "Lightweight Multi-Device WhatsApp Bridge for Ilmuna WA Bot PHP (auto-managed by BridgeManager.php)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.16",
+    "pino": "^9.5.0",
+    "qrcode": "^1.5.4"
+  }
+}
