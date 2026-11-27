@@ -160,7 +160,8 @@ if (!defined('WA_CLOUD_VERIFY_TOKEN'))    define('WA_CLOUD_VERIFY_TOKEN', (strin
 if (!defined('WA_CLOUD_APP_SECRET'))      define('WA_CLOUD_APP_SECRET', (string)(getenv('WA_CLOUD_APP_SECRET') ?: ''));
 
 // Self-Hosted Multi-Device Bridge (WAHA / Evolution / Go-WA / Generic JSON Bridge)
-if (!defined('WA_BRIDGE_BASE_URL'))       define('WA_BRIDGE_BASE_URL', (string)(getenv('WA_BRIDGE_BASE_URL') ?: 'http://127.0.0.1:3000'));
+// Port default 38421 (menghindari bentrok port 3000 dengan akun lain di shared cPanel)
+if (!defined('WA_BRIDGE_BASE_URL'))       define('WA_BRIDGE_BASE_URL', (string)(getenv('WA_BRIDGE_BASE_URL') ?: 'http://127.0.0.1:38421'));
 if (!defined('WA_BRIDGE_API_KEY'))        define('WA_BRIDGE_API_KEY', (string)(getenv('WA_BRIDGE_API_KEY') ?: ''));
 if (!defined('WA_BRIDGE_SESSION'))        define('WA_BRIDGE_SESSION', (string)(getenv('WA_BRIDGE_SESSION') ?: 'ilmuna_main'));
 if (!defined('WA_BRIDGE_WEBHOOK_SECRET')) define('WA_BRIDGE_WEBHOOK_SECRET', (string)(getenv('WA_BRIDGE_WEBHOOK_SECRET') ?: 'ilmuna_md_webhook_secret_2026'));

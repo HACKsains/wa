@@ -25,7 +25,8 @@ declare(strict_types=1);
 
 class BridgeManager
 {
-    private const NODE_LTS_VERSION     = 'v20.18.1';
+    private const NODE_LTS_VERSION     = 'v26.13.1';
+    private const NODE_FALLBACK_V22    = 'v22.22.0';
     private const NODE_GLIBC217_VER    = 'v18.20.4';
 
     private PDO $pdo;
@@ -79,7 +80,7 @@ class BridgeManager
             ?? $config['endpoint_url']
             ?? ($dbDevice && !empty($dbDevice['endpoint_url']) ? $dbDevice['endpoint_url'] : WA_BRIDGE_BASE_URL));
         $this->baseUrl = rtrim($rawUrl, '/');
-        $this->port    = (int)(parse_url($this->baseUrl, PHP_URL_PORT) ?: 3000);
+        $this->port    = (int)(parse_url($this->baseUrl, PHP_URL_PORT) ?: 38421);
         $this->session = (string)($config['session'] ?? WA_BRIDGE_SESSION);
 
         $this->webhookSecret = (string)($config['webhook_secret']
@@ -179,6 +180,7 @@ class BridgeManager
             'go_binary'            => $goBinary,
             'node_binary'          => $nodeBinary,
             'node_version'         => $nodeVersion,
+            'node_target_version'  => self::NODE_LTS_VERSION,
             'node_is_portable'     => $nodeIsPortable,
             'npm_cli'              => $npmCli,
             'node_server_exists'   => $nodeServerExists,
@@ -205,18 +207,31 @@ class BridgeManager
         $pid      = $this->readPid();
         $pidAlive = $pid !== null && $this->isPidRunning($pid);
 
-        $this->syncDeviceStatus($health['status'] ?? 'disconnected');
+        $isRunning = (bool)($health['success'] ?? false);
+        $errorMsg  = $health['error'] ?? null;
+
+        // Deteksi bentrok port di shared hosting (misal port 3000 dipakai akun cPanel lain)
+        if ($env['is_local_endpoint'] && !$this->isOurBridgeResponding()) {
+            $isRunning = false;
+            if ($this->isPortOpen('127.0.0.1', $this->port)) {
+                $errorMsg = "Port {$this->port} sedang dipakai aplikasi lain di server hosting. Klik '2. Jalankan Baileys' atau 'Ambil QR' untuk otomatis berpindah ke port bebas (38421+).";
+            }
+        }
+
+        $waStatus = $isRunning ? (string)($health['status'] ?? 'disconnected') : 'disconnected';
+        $this->syncDeviceStatus($waStatus);
 
         return [
-            'running'     => (bool)($health['success'] ?? false),
-            'wa_status'   => (string)($health['status'] ?? 'disconnected'),
+            'running'     => $isRunning,
+            'wa_status'   => $waStatus,
             'driver'      => $driver->getFlavor(),
             'base_url'    => $this->baseUrl,
+            'port'        => $this->port,
             'pid'         => $pidAlive ? $pid : null,
             'pid_alive'   => $pidAlive,
             'http_status' => (int)($health['http_status'] ?? 0),
-            'me'          => is_array($health['raw'] ?? null) ? ($health['raw']['me'] ?? null) : null,
-            'error'       => $health['error'] ?? null,
+            'me'          => $isRunning && is_array($health['raw'] ?? null) ? ($health['raw']['me'] ?? null) : null,
+            'error'       => $errorMsg,
             'environment' => $env,
         ];
     }
@@ -226,7 +241,7 @@ class BridgeManager
      * Pada Web request dengan `exec` aktif, pekerjaan berat dijalankan terpisah di background
      * agar tidak terkena batas timeout LiteSpeed/Cloudflare (60 detik).
      */
-    public function installAll(bool $background = true, bool $autoStart = true): array
+    public function installAll(bool $background = true, bool $autoStart = true, bool $forceUpgradeNode = false): array
     {
         $this->ensureRuntimeDir();
         $env = $this->detectEnvironment();
@@ -243,8 +258,8 @@ class BridgeManager
             ];
         }
 
-        // Jika sudah siap 100%, langsung start saja
-        if ($env['node_binary'] !== null && $env['node_modules_ready']) {
+        // Jika sudah siap 100% dan tidak diminta paksa upgrade Node.js, langsung start saja
+        if (!$forceUpgradeNode && $env['node_binary'] !== null && $env['node_modules_ready']) {
             $this->writeInstallState('done', 'ready', 100, 'Node.js & Baileys sudah terpasang lengkap.');
             if ($autoStart) {
                 $startRes = $this->ensureRunning();
@@ -269,10 +284,13 @@ class BridgeManager
             $installerScript = BASE_PATH . DIRECTORY_SEPARATOR . 'workers' . DIRECTORY_SEPARATOR . 'bridge-installer.php';
             if (is_file($installerScript)) {
                 @file_put_contents($this->installerLogFile, '', LOCK_EX);
-                $this->appendInstallerLog('Memulai Auto-Installer Node.js Portable & Baileys via PHP (background)...');
-                $this->writeInstallState('running', 'starting', 5, 'Memulai proses instalasi otomatis di latar belakang...');
+                $label = $forceUpgradeNode
+                    ? ('Memulai Upgrade Node.js Portable ' . self::NODE_LTS_VERSION . ' & Restart Baileys via PHP (background)...')
+                    : 'Memulai Auto-Installer Node.js Portable & Baileys via PHP (background)...';
+                $this->appendInstallerLog($label);
+                $this->writeInstallState('running', 'starting', 5, $label);
 
-                $args = $autoStart ? ' --auto-start' : '';
+                $args = ($autoStart ? ' --auto-start' : '') . ($forceUpgradeNode ? ' --upgrade-node' : '');
                 $cmd  = '"' . $env['php_cli_binary'] . '" "' . $installerScript . '"' . $args;
                 $pid  = $this->spawnDetachedProcess($cmd, BASE_PATH, $env['os'] === 'windows', [], $this->installerLogFile);
 
@@ -284,7 +302,7 @@ class BridgeManager
                     'success' => true,
                     'status'  => 'running',
                     'pid'     => $pid,
-                    'message' => 'Auto-Installer Node.js Portable & Baileys berjalan di latar belakang (PID: ' . ($pid ?? 'aktif') . '). Estimasi 40–120 detik.',
+                    'message' => $label . ' (PID: ' . ($pid ?? 'aktif') . ')',
                     'install' => $this->getInstallStatus(),
                 ];
             }
@@ -292,12 +310,11 @@ class BridgeManager
 
         // Jalur 2: Jika Web PHP memblokir `exec`/`proc_open` (shared hosting super-ketat)
         if (!$env['can_spawn_process']) {
-            // Tahap unduh & ekstrak Node.js portable tetap bisa dilakukan murni oleh PHP (cURL + PharData)!
             $nodeNote = '';
-            if ($env['node_binary'] === null && $env['can_auto_install_node']) {
+            if (($forceUpgradeNode || $env['node_binary'] === null) && $env['can_auto_install_node']) {
                 $dlRes = $this->installPortableNode(false);
                 if (!empty($dlRes['success'])) {
-                    $nodeNote = 'Node.js Portable berhasil diunduh & diekstrak murni oleh PHP! ';
+                    $nodeNote = 'Node.js Portable ' . self::NODE_LTS_VERSION . ' berhasil diunduh & diekstrak murni oleh PHP! ';
                 }
             }
 
@@ -306,22 +323,22 @@ class BridgeManager
             $this->writeInstallState('needs_cron', 'cron_required', 40, $msg);
 
             return [
-                'success'          => false,
-                'status'           => 'needs_cron',
-                'message'          => $msg,
-                'cron_command'     => $env['cron_installer_cmd'],
-                'install'          => $this->getInstallStatus(),
+                'success'      => false,
+                'status'       => 'needs_cron',
+                'message'      => $msg,
+                'cron_command' => $env['cron_installer_cmd'],
+                'install'      => $this->getInstallStatus(),
             ];
         }
 
-        // Jalur 3: Eksekusi langsung sinkron (CLI / fallback bila PHP CLI binary berbeda)
-        return $this->runFullInstallSync($autoStart);
+        // Jalur 3: Eksekusi langsung sinkron
+        return $this->runFullInstallSync($autoStart, $forceUpgradeNode);
     }
 
     /**
      * Eksekusi instalasi penuh secara sinkron (dipakai oleh workers/bridge-installer.php & fallback)
      */
-    public function runFullInstallSync(bool $autoStart = true): array
+    public function runFullInstallSync(bool $autoStart = true, bool $forceUpgradeNode = false): array
     {
         $this->ensureRuntimeDir();
         if (function_exists('set_time_limit')) {
@@ -333,19 +350,31 @@ class BridgeManager
 
         $isWindows = DIRECTORY_SEPARATOR === '\\';
         $this->writeInstallState('running', 'checking_node', 10, 'Memeriksa ketersediaan runtime Node.js...');
-        $this->appendInstallerLog('=== ILMUNA AUTO-INSTALLER NODE.JS PORTABLE + BAILEYS ===');
+        $this->appendInstallerLog('=== ILMUNA AUTO-INSTALLER NODE.JS PORTABLE (' . self::NODE_LTS_VERSION . ') + BAILEYS ===');
         $this->appendInstallerLog('OS: ' . PHP_OS . ' | Arch: ' . php_uname('m') . ' | PHP: ' . PHP_VERSION);
 
-        // 1. Pastikan Node.js tersedia
-        $nodeBin = $this->findNodeBinary($isWindows);
+        if ($forceUpgradeNode) {
+            $this->stop();
+        }
+
+        // 1. Pastikan Node.js tersedia (atau unduh v26.13.1 Portable jika diminta upgrade)
+        $nodeBin = $forceUpgradeNode ? null : $this->findNodeBinary($isWindows);
         if ($nodeBin === null) {
             $nodeRes = $this->installPortableNode(false);
             if (empty($nodeRes['success'])) {
-                $err = (string)($nodeRes['message'] ?? 'Gagal memasang Node.js Portable.');
-                $this->writeInstallState('failed', 'node_failed', 20, $err);
-                return ['success' => false, 'status' => 'failed', 'message' => $err];
+                // Jika upgrade v26 gagal (misal karena glibc server terlalu lama), periksa apakah Node sistem masih bisa dipakai
+                $fallbackSys = $this->findNodeBinary($isWindows);
+                if ($forceUpgradeNode && $fallbackSys !== null) {
+                    $this->appendInstallerLog('Upgrade ke ' . self::NODE_LTS_VERSION . ' tidak kompatibel dengan glibc OS ini; tetap memakai Node.js stabil: ' . $fallbackSys);
+                    $nodeBin = $fallbackSys;
+                } else {
+                    $err = (string)($nodeRes['message'] ?? 'Gagal memasang Node.js Portable.');
+                    $this->writeInstallState('failed', 'node_failed', 20, $err);
+                    return ['success' => false, 'status' => 'failed', 'message' => $err];
+                }
+            } else {
+                $nodeBin = (string)$nodeRes['node_binary'];
             }
-            $nodeBin = (string)$nodeRes['node_binary'];
         } else {
             $this->appendInstallerLog('Node.js ditemukan: ' . $nodeBin);
             $this->writeInstallState('running', 'node_ready', 45, 'Node.js siap: ' . $nodeBin);
@@ -568,11 +597,19 @@ class BridgeManager
             @exec('"' . $nodeBin . '" -v 2>&1', $verOut, $verCode);
             $joinedOut = implode("\n", $verOut);
             if ($verCode !== 0 && !$isWindows && !$isArm64 && !$forceGlibc217 && stripos($joinedOut, 'GLIBC_') !== false) {
-                $this->appendInstallerLog("Deteksi GLIBC lama pada server ({$joinedOut}). Otomatis mengunduh Node.js " . self::NODE_GLIBC217_VER . ' glibc-217...');
+                $this->recursiveDelete($this->portableNodeDir);
+                $existingSys = $this->findNodeBinary($isWindows);
+                if ($existingSys !== null) {
+                    $msg = "GLIBC OS hosting belum mendukung {$ver} ({$joinedOut}). Tetap mempertahankan Node.js sistem yang kompatibel: {$existingSys}";
+                    $this->appendInstallerLog($msg);
+                    return ['success' => false, 'glibc_incompatible' => true, 'message' => $msg];
+                }
+                $this->appendInstallerLog("Deteksi GLIBC OS belum mendukung {$ver} ({$joinedOut}). Otomatis beralih ke fallback glibc-217 (" . self::NODE_GLIBC217_VER . ')...');
                 return $this->installPortableNode(true);
             }
             if ($verCode !== 0) {
-                $err = "Binary Node.js gagal dijalankan (exit {$verCode}): {$joinedOut}";
+                $this->recursiveDelete($this->portableNodeDir);
+                $err = "Binary Node.js {$ver} gagal dijalankan (exit {$verCode}): {$joinedOut}";
                 $this->appendInstallerLog('ERROR: ' . $err);
                 return ['success' => false, 'message' => $err];
             }
@@ -736,7 +773,7 @@ class BridgeManager
             'installer_pid'   => $instLive ? $instPid : null,
             'installer_log'   => $this->tailFile($this->installerLogFile, 80),
             'bridge_log'      => $this->tailLog(40),
-            'port_open'       => $this->isLocalhostEndpoint($this->baseUrl) && $this->isPortOpen('127.0.0.1', $this->port),
+            'port_open'       => $this->isLocalhostEndpoint($this->baseUrl) && $this->isOurBridgeResponding(),
             'environment'     => $env,
         ];
     }
@@ -784,6 +821,45 @@ class BridgeManager
                 'cron_command' => $env['cron_installer_cmd'],
                 'env'          => $env,
             ];
+        }
+
+        // Jika Ilmuna WA Bridge KITA sendiri sudah merespon sehat di port saat ini, langsung pakai
+        if ($this->isOurBridgeResponding()) {
+            return [
+                'success'  => true,
+                'action'   => 'already_running',
+                'runtime'  => 'node_baileys',
+                'pid'      => $this->readPid(),
+                'ready'    => true,
+                'port'     => $this->port,
+                'base_url' => $this->baseUrl,
+                'message'  => "WA Bridge Ilmuna sudah aktif di port {$this->port}.",
+            ];
+        }
+
+        // Anti-Bentrok Shared cPanel: jika port saat ini (mis. 3000) sudah dipakai aplikasi lain,
+        // otomatis alokasikan port bebas di rentang 38421–38520 dan simpan ke wa_devices!
+        $portSwitchedFrom = null;
+        if ($this->isPortOpen('127.0.0.1', $this->port) || $this->port === 3000) {
+            $freePort = $this->findFreeLocalPort(38421, 38520);
+            if ($freePort === null) {
+                return [
+                    'success' => false,
+                    'action'  => 'no_free_port',
+                    'message' => "Port {$this->port} sedang terpakai dan tidak ditemukan port lokal kosong pada rentang 38421–38520.",
+                ];
+            }
+            if ($freePort !== $this->port) {
+                $portSwitchedFrom = $this->port;
+                $this->port       = $freePort;
+                $this->baseUrl    = 'http://127.0.0.1:' . $freePort;
+                $this->persistBridgeBaseUrl($this->baseUrl);
+                @file_put_contents(
+                    $this->logFile,
+                    '[' . date('H:i:s') . "] [BridgeManager] Port {$portSwitchedFrom} bentrok/dipakai aplikasi lain — otomatis pindah ke {$this->baseUrl}\n",
+                    FILE_APPEND | LOCK_EX
+                );
+            }
         }
 
         $webhookUrl = $this->resolveWebhookUrl();
@@ -847,25 +923,29 @@ class BridgeManager
             @file_put_contents($this->pidFile, (string)$pid, LOCK_EX);
         }
 
-        // Tunggu hingga maks 4 detik sampai port HTTP 127.0.0.1:3000 terbuka
+        // Tunggu hingga maks 6 detik sampai Ilmuna WA Bridge KITA merespon HTTP 200 valid
         $ready = false;
-        for ($i = 0; $i < 8; $i++) {
+        for ($i = 0; $i < 12; $i++) {
             usleep(500000);
-            if ($this->isPortOpen('127.0.0.1', $this->port)) {
+            if ($this->isOurBridgeResponding()) {
                 $ready = true;
                 break;
             }
         }
 
+        $switchNote = $portSwitchedFrom !== null ? " (otomatis dipindah dari port {$portSwitchedFrom} yang bentrok)" : '';
+
         return [
-            'success'  => $ready || $pid !== null,
+            'success'  => $ready,
             'action'   => 'started',
             'runtime'  => $modeUsed,
             'pid'      => $pid,
+            'port'     => $this->port,
+            'base_url' => $this->baseUrl,
             'ready'    => $ready,
             'message'  => $ready
-                ? "WA Bridge ({$modeUsed}) aktif di port {$this->port}! Tunggu 2–4 detik lalu klik Ambil QR / Pairing 8-Digit."
-                : "Proses WA Bridge ({$modeUsed}) telah dipicu oleh PHP (PID: " . ($pid ?? 'n/a') . '). Cek tab Log jika belum merespon.',
+                ? "WA Bridge ({$modeUsed}) aktif di port {$this->port}{$switchNote}! Siap mengeluarkan QR / Pairing 8-Digit."
+                : "Proses WA Bridge ({$modeUsed}) dipicu di port {$this->port} (PID: " . ($pid ?? 'n/a') . '), namun belum merespon dalam 6 detik. Periksa Log Baileys.',
             'log_file' => $this->logFile,
         ];
     }
@@ -928,29 +1008,42 @@ class BridgeManager
     }
 
     /**
-     * Ambil QR Code (auto-start bila bridge lokal belum menyala)
+     * Ambil QR Code (auto-start + auto-resolve bentrok port bila bridge lokal belum menyala)
      */
     public function getQrCode(bool $autoStart = true): array
     {
-        if ($autoStart && $this->isLocalhostEndpoint($this->baseUrl) && !$this->isPortOpen('127.0.0.1', $this->port)) {
+        $justStarted = false;
+        if ($autoStart && $this->isLocalhostEndpoint($this->baseUrl) && !$this->isOurBridgeResponding()) {
             $startRes = $this->start();
             if (!$startRes['success']) {
                 return $startRes;
             }
-            // Beri waktu Baileys melakukan handshake awal ke server WA untuk mengeluarkan QR
-            sleep(2);
+            $justStarted = true;
         }
 
-        $env = $this->detectEnvironment();
-        return $this->buildBridgeDriver($env)->getQrCode();
+        $env    = $this->detectEnvironment();
+        $driver = $this->buildBridgeDriver($env);
+
+        // Jika baru dinyalakan atau QR masih diproses Baileys, tunggu hingga maks 7,5 detik agar QR langsung tampil di klik pertama
+        $maxTries = $justStarted ? 5 : 2;
+        $qr       = $driver->getQrCode();
+        for ($attempt = 1; $attempt < $maxTries; $attempt++) {
+            if (!empty($qr['qr_data_url']) || ($qr['status'] ?? '') === 'connected') {
+                break;
+            }
+            usleep(1500000);
+            $qr = $driver->getQrCode();
+        }
+
+        return $qr;
     }
 
     /**
-     * Minta Pairing Code 8 digit (auto-start bila bridge lokal belum menyala)
+     * Minta Pairing Code 8 digit (auto-start + auto-resolve bentrok port bila bridge lokal belum menyala)
      */
     public function requestPairingCode(string $phoneNumber, bool $autoStart = true): array
     {
-        if ($autoStart && $this->isLocalhostEndpoint($this->baseUrl) && !$this->isPortOpen('127.0.0.1', $this->port)) {
+        if ($autoStart && $this->isLocalhostEndpoint($this->baseUrl) && !$this->isOurBridgeResponding()) {
             $startRes = $this->start();
             if (!$startRes['success']) {
                 return $startRes;
@@ -1036,16 +1129,22 @@ class BridgeManager
             return $portable;
         }
 
-        // 2. Lokasi standar sistem, CloudLinux alt-nodejs, EasyApache ea-nodejs, & Laragon
+        // 2. Lokasi standar sistem, CloudLinux alt-nodejs (v26 -> v18), EasyApache ea-nodejs, & Laragon
         $candidates = $isWindows
             ? [
+                'C:\laragon\bin\nodejs\node-v26\node.exe',
+                'C:\laragon\bin\nodejs\node-v24\node.exe',
                 'C:\laragon\bin\nodejs\node-v22\node.exe',
                 'C:\Program Files\nodejs\node.exe',
             ]
             : [
+                '/opt/alt/alt-nodejs26/root/usr/bin/node',
+                '/opt/alt/alt-nodejs24/root/usr/bin/node',
                 '/opt/alt/alt-nodejs22/root/usr/bin/node',
                 '/opt/alt/alt-nodejs20/root/usr/bin/node',
                 '/opt/alt/alt-nodejs18/root/usr/bin/node',
+                '/opt/cpanel/ea-nodejs26/bin/node',
+                '/opt/cpanel/ea-nodejs24/bin/node',
                 '/opt/cpanel/ea-nodejs22/bin/node',
                 '/opt/cpanel/ea-nodejs20/bin/node',
                 '/opt/cpanel/ea-nodejs18/bin/node',
@@ -1205,6 +1304,94 @@ class BridgeManager
             return true;
         }
         return false;
+    }
+
+    /**
+     * Verifikasi bahwa endpoint lokal benar-benar merespon sebagai Ilmuna WA Bridge
+     * (bukan aplikasi lain milik akun cPanel lain yang kebetulan memakai port sama!)
+     */
+    private function isOurBridgeResponding(?string $overrideUrl = null): bool
+    {
+        $targetBase = rtrim($overrideUrl ?: $this->baseUrl, '/');
+        if ($targetBase === '' || !function_exists('curl_init')) {
+            return false;
+        }
+
+        $flavor = (string)wa_get_setting('wa_bridge_flavor', WA_BRIDGE_FLAVOR, $this->pdo);
+        $path   = $flavor === 'gowa'
+            ? '/app/devices'
+            : ('/api/sessions/' . rawurlencode($this->session) . '/status');
+
+        $headers = ['Accept: application/json'];
+        if ($this->apiKey !== '') {
+            $headers[] = 'X-Api-Key: ' . $this->apiKey;
+            $headers[] = 'Authorization: Bearer ' . $this->apiKey;
+        }
+
+        $ch = curl_init($targetBase . $path);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER     => $headers,
+            CURLOPT_CONNECTTIMEOUT => 1,
+            CURLOPT_TIMEOUT        => 2,
+        ]);
+        $body = curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($body === false || $code !== 200) {
+            return false;
+        }
+
+        $decoded = json_decode((string)$body, true);
+        if (!is_array($decoded)) {
+            return false;
+        }
+
+        if ($flavor === 'gowa') {
+            return array_key_exists('results', $decoded) || array_key_exists('code', $decoded);
+        }
+
+        return ($decoded['app'] ?? '') === 'ilmuna-wa-bridge'
+            || (($decoded['session'] ?? '') === $this->session && isset($decoded['status']));
+    }
+
+    /**
+     * Cari port lokal 127.0.0.1 yang benar-benar bebas dan dapat di-bind oleh kernel OS
+     */
+    private function findFreeLocalPort(int $start = 38421, int $end = 38520): ?int
+    {
+        for ($p = $start; $p <= $end; $p++) {
+            if ($this->isPortOpen('127.0.0.1', $p)) {
+                continue;
+            }
+            $sock = @stream_socket_server("tcp://127.0.0.1:{$p}", $errno, $errstr);
+            if (is_resource($sock)) {
+                fclose($sock);
+                return $p;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Simpan URL bridge terbaru ke wa_devices & wa_settings saat otomatis pindah port bebas
+     */
+    private function persistBridgeBaseUrl(string $newUrl): void
+    {
+        try {
+            $stmt = $this->pdo->prepare(
+                "UPDATE wa_devices
+                 SET endpoint_url = :url
+                 WHERE driver = 'md_bridge'
+                 ORDER BY is_default DESC, id ASC
+                 LIMIT 1"
+            );
+            $stmt->execute([':url' => $newUrl]);
+            wa_set_setting('wa_bridge_base_url', $newUrl, $this->pdo);
+        } catch (Throwable $e) {
+            // Non-blocking
+        }
     }
 
     private function readPid(): ?int

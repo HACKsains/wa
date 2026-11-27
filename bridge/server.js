@@ -36,7 +36,7 @@ const {
   fetchLatestBaileysVersion,
 } = require('@whiskeysockets/baileys');
 
-const PORT = parseInt(process.env.BRIDGE_PORT || '3000', 10);
+const PORT = parseInt(process.env.BRIDGE_PORT || '38421', 10);
 const SESSION = process.env.BRIDGE_SESSION || 'ilmuna_main';
 const API_KEY = process.env.BRIDGE_API_KEY || '';
 const WEBHOOK_URL = process.env.BRIDGE_WEBHOOK_URL || 'http://localhost/wa%20bot/webhook.php';
@@ -301,9 +301,11 @@ const server = http.createServer(async (req, res) => {
     // 1. Status Session
     if (method === 'GET' && /^\/api\/sessions\/[^/]+\/status$/.test(pathname)) {
       return sendJson(res, 200, {
+        app: 'ilmuna-wa-bridge',
         session: SESSION,
         status: connectionStatus,
         me: connectedMe,
+        port: PORT,
         uptime_sec: Math.floor(process.uptime()),
       });
     }
@@ -311,6 +313,7 @@ const server = http.createServer(async (req, res) => {
     // 2. Ambil QR Code (PNG Data URL)
     if (method === 'GET' && /^\/api\/sessions\/[^/]+\/qr$/.test(pathname)) {
       return sendJson(res, 200, {
+        app: 'ilmuna-wa-bridge',
         session: SESSION,
         status: connectionStatus,
         qr_data_url: latestQrDataUrl,
@@ -450,6 +453,11 @@ const server = http.createServer(async (req, res) => {
     console.error(`[HTTP ${pathname}] Error:`, err.message);
     return sendJson(res, 500, { error: err.message });
   }
+});
+
+server.on('error', (err) => {
+  console.error(`[Ilmuna WA Bridge] Server bind error on 127.0.0.1:${PORT}: ${err.code || err.message}`);
+  process.exit(1);
 });
 
 server.listen(PORT, '127.0.0.1', () => {

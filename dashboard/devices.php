@@ -337,6 +337,9 @@ require_once BASE_PATH . '/includes/header.php';
                         <iconify-icon icon="solar:cloud-download-bold" width="17"></iconify-icon>
                         <span>1. Install Node.js + Baileys</span>
                     </button>
+                    <button type="button" class="btn btn-sm btn-outline" id="btnUpgradeNode" style="display:none;" title="Unduh Node.js v26.13.1 LTS Portable via PHP">
+                        <iconify-icon icon="solar:arrow-up-bold"></iconify-icon> Upgrade Node v26.13.1
+                    </button>
                     <button type="button" class="ilmuna-nav-btn ilmuna-nav-btn--primary" id="btnStartBridge">
                         <iconify-icon icon="solar:play-bold" width="16"></iconify-icon>
                         <span>2. Jalankan Baileys</span>
@@ -653,6 +656,13 @@ document.addEventListener('DOMContentLoaded', function () {
             : 'Belum Terpasang';
         setChipStyle(document.getElementById('icoNode'), hasNode, false);
 
+        const upgBtn = document.getElementById('btnUpgradeNode');
+        if (upgBtn) {
+            const targetVer = env.node_target_version || 'v26.13.1';
+            const isLatest = env.node_version && String(env.node_version).indexOf(targetVer) === 0;
+            upgBtn.style.display = (hasNode && !isLatest && env.can_auto_install_node) ? 'inline-flex' : 'none';
+        }
+
         document.getElementById('stBaileysVal').textContent = hasBaileys ? 'Siap (@whiskeysockets)' : 'Belum Diinstall';
         setChipStyle(document.getElementById('icoBaileys'), hasBaileys, hasNode);
 
@@ -910,6 +920,27 @@ document.addEventListener('DOMContentLoaded', function () {
                 startInstallPolling();
             } else {
                 Ilmuna.warning('Perlu Cron cPanel', res.message);
+            }
+        } finally {
+            this.disabled = false;
+        }
+    });
+
+    document.getElementById('btnUpgradeNode').addEventListener('click', async function () {
+        const ok = await Ilmuna.confirm(
+            'question',
+            'Upgrade ke Node.js v26.13.1 LTS Portable?',
+            'PHP akan mengunduh Node.js v26.13.1 LTS resmi ke bridge/runtime/node/ dan merestart Baileys di port bebas (38421+). Jika glibc OS hosting lebih lama, otomatis kembali ke versi stabil.'
+        );
+        if (!ok) return;
+        this.disabled = true;
+        try {
+            const res = await WaPanel.get(window.ILMUNA_BASE_URL + '/api/v1/bridge.php?action=upgrade_node');
+            if (res.success) {
+                Ilmuna.info('Upgrade Node.js Dimulai', res.message);
+                startInstallPolling();
+            } else {
+                Ilmuna.warning('Info Upgrade', res.message);
             }
         } finally {
             this.disabled = false;

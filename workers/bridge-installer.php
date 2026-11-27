@@ -31,13 +31,14 @@ if (!$lockFp || !flock($lockFp, LOCK_EX | LOCK_NB)) {
     exit(0);
 }
 
-$args      = array_slice($argv ?? [], 1);
-$autoStart = !in_array('--no-start', $args, true);
+$args             = array_slice($argv ?? [], 1);
+$autoStart        = !in_array('--no-start', $args, true);
+$forceUpgradeNode = in_array('--upgrade-node', $args, true);
 
 try {
     $pdo     = getDBConnection();
     $manager = new BridgeManager($pdo);
-    $result  = $manager->runFullInstallSync($autoStart);
+    $result  = $manager->runFullInstallSync($autoStart, $forceUpgradeNode);
 
     echo json_encode([
         'timestamp' => date('Y-m-d H:i:s'),

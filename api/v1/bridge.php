@@ -57,7 +57,11 @@ try {
             wa_json_response(true, 'Status koneksi WA Bridge berhasil dimuat.', $manager->getStatus());
 
         case 'install_all':
-            $res = $manager->installAll(true, true);
+            $res = $manager->installAll(true, true, false);
+            wa_json_response((bool)$res['success'], (string)$res['message'], $res, $res['success'] ? 200 : 422);
+
+        case 'upgrade_node':
+            $res = $manager->installAll(true, true, true);
             wa_json_response((bool)$res['success'], (string)$res['message'], $res, $res['success'] ? 200 : 422);
 
         case 'install_node':
